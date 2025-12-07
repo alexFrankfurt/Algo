@@ -1,586 +1,781 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head>
-<title>Sorting Algorithm Visualization</title>
-<style>
-  body {
-    font-family: sans-serif;
-    transition: all 0.5s ease-in-out;
-  }
-  .dark-theme {
-    background-color: #222;
-    color: #eee;
-  }
-  .container {
-    display: flex;
-    align-items: flex-end;
-    height: 200px;
-    border: 1px solid #eee;
-    position: relative;
-  }
-  .box {
-    width: 50px;
-    background-color: #44b;
-    border: 1px solid #88f;
-    margin-right: 5px;
-    text-align: center;
-    color: #eee;
-    position: relative;
-    transition: all 0.5s ease-in-out;
-  }
-  .arrow-container {
-    position: relative;
-    height: 50px;
-    margin-top: 10px;
-  }
-  .arrow {
-    width: 0;
-    height: 0;
-    border-left: 10px solid transparent;
-    border-right: 10px solid transparent;
-    border-bottom: 20px solid red;
-    position: absolute;
-    left: 20px;
-    transition: all 0.5s ease-in-out;
-  }
-  #minIndexMarker {
-    width: 20px;
-    height: 20px;
-    background-color: yellow;
-    position: absolute;
-    left: 15px;
-    top: 25px;
-    border-radius: 50%;
-    transition: all 0.5s ease-in-out;
-  }
-  .comparison {
-    margin-top: 10px;
-    font-size: 1.2em;
-    font-weight: bold;
-    height: 30px;
-    transition: background-color 0.5s ease-in-out;
-  }
-  .highlight-true {
-    background-color: green;
-  }
-  .highlight-compare {
-    background-color: red;
-  }
-  .highlight-winner {
-    background-color: green;
-  }
-  button {
-    margin-top: 10px;
-    font-size: 1.2em;
-    background-color: #444;
-    color: #eee;
-    border: 1px solid #888;
-  }
-  #description {
-    margin-bottom: 20px;
-    max-width: 600px;
-  }
-  .controls {
-    margin-top: 10px;
-  }
-  #merge-area {
-    margin-top: 10px;
-    transition: opacity 0.5s ease-in-out;
-  }
-  .fade-out {
-    opacity: 0;
-  }
-  .fade-in {
-    opacity: 1;
-  }
-  .flying-box {
-    position: absolute;
-    transition: all 0.5s ease-in-out;
-  }
-  .level-container {
-    display: flex;
-    justify-content: space-around;
-    align-items: flex-end;
-    border: none;
-    height: auto;
-    min-height: 120px;
-  }
-</style>
-</head>
-<body class="dark-theme">
-<h1>Selection Sort Visualization</h1>
-<div id="description">
-  <h2>How Selection Sort Works</h2>
-  <p>
-    Selection sort is a simple sorting algorithm that divides the input list into two parts: a sorted part at the left end and an unsorted part at the right end. Initially, the sorted part is empty and the unsorted part is the entire list.
-  </p>
-  <p>
-    The algorithm proceeds by finding the smallest (or largest, depending on sorting order) element in the unsorted part and swapping it with the leftmost unsorted element, moving the boundary between the sorted and unsorted parts one element to the right.
-  </p>
-</div>
-<div class="container" id="container">
-  <div class="box" style="height: 60px;">60</div>
-  <div class="box" style="height: 30px;">30</div>
-  <div class="box" style="height: 90px;">90</div>
-  <div class="box" style="height: 20px;">20</div>
-  <div class="box" style="height: 50px;">50</div>
-  <div class="box" style="height: 80px;">80</div>
-  <div class="box" style="height: 10px;">10</div>
-  <div class="box" style="height: 70px;">70</div>
-  <div class="box" style="height: 40px;">40</div>
-  <div class="box" style="height: 100px;">100</div>
-</div>
-<div class="arrow-container">
-  <div class="arrow" id="arrow"></div>
-  <div id="minIndexMarker"></div>
-</div>
-<div class="comparison" id="comparison"></div>
-<div class="controls">
-  <button onclick="selectionSort()">Sort</button>
-  <button id="pauseBtn" onclick="togglePause()">Pause</button>
-  <button onclick="location.reload()">Reset</button>
-  <label for="speedSlider">Step (ms):</label>
-  <input type="range" id="speedSlider" min="100" max="2000" value="1000" step="100">
-</div>
-
-<hr>
-<h2>Merge Sort Visualization v4</h2>
-<div id="description-mergesort">
-    <h2>How Merge Sort Works</h2>
-    <p>
-        Merge sort is a classic sorting algorithm that follows the "divide and conquer" paradigm. It works in three main phases:
-    </p>
-    <ol>
-        <li><b>Divide:</b> The algorithm starts by dividing the unsorted list into two (ideally) equal halves. It then continues to recursively divide each of these halves into smaller sub-lists until each sub-list contains only one element. A list with a single element is considered inherently sorted.</li>
-        <li><b>Conquer (Merge):</b> Once the lists are divided down to single elements, the algorithm begins to merge them back together. It takes two adjacent sub-lists and merges them into a single, sorted list.</li>
-        <li><b>Combine:</b> This merging process is repeated, taking the newly sorted sub-lists and merging them, until we are left with a single, completely sorted list. The key to the algorithm is the merging step, where elements from the two sub-lists are compared and placed in the correct order in the new list.</li>
-    </ol>
-</div>
-<div class="container" id="mergesort-container">
-  <div class="box" style="height: 60px;">60</div>
-  <div class="box" style="height: 30px;">30</div>
-  <div class="box" style="height: 90px;">90</div>
-  <div class="box" style="height: 20px;">20</div>
-  <div class="box" style="height: 50px;">50</div>
-  <div class="box" style="height: 80px;">80</div>
-  <div class="box" style="height: 10px;">10</div>
-  <div class="box" style="height: 70px;">70</div>
-  <div class="box" style="height: 40px;">40</div>
-  <div class="box" style="height: 100px;">100</div>
-</div>
-<div class="controls">
-  <button onclick="runMergeSort()">Sort Merge Sort v4</button>
-</div>
-<div id="merge-area" class="container"></div>
-
-<hr>
-<h2>Merge Sort Visualization v5</h2>
-<div id="mergesort-v5-container"></div>
-<div class="controls">
-  <button id="v5-divide-btn" onclick="runMergeSortV5_Divide()">1. Divide</button>
-  <button id="v5-conquer-btn" onclick="runMergeSortV5_Conquer()" disabled>2. Conquer (Merge)</button>
-</div>
-
-<script>
-const container = document.getElementById('container');
-const comparisonEl = document.getElementById('comparison');
-const arrow = document.getElementById('arrow');
-const minIndexMarker = document.getElementById('minIndexMarker');
-const pauseBtn = document.getElementById('pauseBtn');
-const speedSlider = document.getElementById('speedSlider');
-let boxes = Array.from(document.querySelectorAll('#container .box'));
-let isPaused = false;
-let rootV5; // To store the root of the v5 tree
-
-function togglePause() {
-  isPaused = !isPaused;
-  pauseBtn.textContent = isPaused ? 'Resume' : 'Pause';
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms * (speedSlider.value / 1000)));
-}
-
-async function checkPause() {
-  while (isPaused) {
-    await sleep(100);
-  }
-}
-
-async function swap(el1, el2) {
-  const style1 = window.getComputedStyle(el1);
-  const style2 = window.getComputedStyle(el2);
-
-  const transform1 = style1.getPropertyValue("transform");
-  const transform2 = style2.getPropertyValue("transform");
-
-  el1.style.transform = transform2;
-  el2.style.transform = transform1;
-
-  await sleep(500);
-  await checkPause();
-
-  let temp = el1.cloneNode(true);
-  el1.parentNode.insertBefore(temp, el2);
-  el2.parentNode.insertBefore(el1, temp);
-  el2.parentNode.removeChild(temp);
-}
-
-
-async function selectionSort() {
-  let n = boxes.length;
-  for (let i = 0; i < n - 1; i++) {
-    let minIndex = i;
-    arrow.style.left = (i * 55 + 20) + 'px';
-    minIndexMarker.style.left = (minIndex * 55 + 15) + 'px';
-    await sleep(500);
-    await checkPause();
-
-    for (let j = i + 1; j < n; j++) {
-      arrow.style.left = (j * 55 + 20) + 'px';
-      await sleep(200);
-      await checkPause();
-
-      let val1 = parseInt(boxes[minIndex].textContent);
-      let val2 = parseInt(boxes[j].textContent);
-
-      comparisonEl.textContent = `${val1} > ${val2}`;
-      if (val2 < val1) {
-        comparisonEl.classList.add('highlight-true');
-      }
-      await sleep(500);
-      await checkPause();
-      comparisonEl.textContent = '';
-      if (val2 < val1) {
-        comparisonEl.classList.remove('highlight-true');
-        minIndex = j;
-        minIndexMarker.style.left = (minIndex * 55 + 15) + 'px';
-      }
-    }
-
-    if (minIndex !== i) {
-      comparisonEl.textContent = `Swapping ${boxes[i].textContent} and ${boxes[minIndex].textContent}`;
-      await sleep(500);
-      await checkPause();
-
-      const box1 = boxes[i];
-      const box2 = boxes[minIndex];
-
-      const rect1 = box1.getBoundingClientRect();
-      const rect2 = box2.getBoundingClientRect();
-
-      const x1 = rect2.left - rect1.left;
-      const x2 = rect1.left - rect2.left;
-
-      box1.style.transform = `translate(${x1}px, 20px)`;
-      box2.style.transform = `translate(${x2}px, -20px)`;
-
-      await sleep(500);
-      await checkPause();
-
-      box1.style.transform = `translate(${x1}px, 0px)`;
-      box2.style.transform = `translate(${x2}px, 0px)`;
-
-      await sleep(500);
-      await checkPause();
-
-
-      [boxes[i], boxes[minIndex]] = [boxes[minIndex], boxes[i]];
-
-      container.innerHTML = '';
-      boxes.forEach(box => {
-        box.style.transform = '';
-        container.appendChild(box);
-      });
-
-
-      await sleep(500);
-      await checkPause();
-      comparisonEl.textContent = '';
-    }
-  }
-}
-
-async function runMergeSort() {
-  let mergeSortBoxes = Array.from(document.querySelectorAll('#mergesort-container .box'));
-  await mergeSort(mergeSortBoxes, 0, mergeSortBoxes.length - 1);
-}
-
-async function mergeSort(arr, l, r) {
-  if (l >= r) {
-    return;
-  }
-  let m = l + Math.floor((r - l) / 2);
-  await mergeSort(arr, l, m);
-  await mergeSort(arr, m + 1, r);
-  await merge(arr, l, m, r);
-}
-
-async function merge(arr, l, m, r) {
-  const mergeArea = document.getElementById('merge-area');
-  mergeArea.innerHTML = '';
-
-  let flyingBoxesToMergeArea = [];
-  for (let i = l; i <= r; i++) {
-    const box = arr[i];
-    const rect = box.getBoundingClientRect();
-    const flyingBox = box.cloneNode(true);
-    flyingBox.classList.add('flying-box');
-    flyingBox.style.left = rect.left + 'px';
-    flyingBox.style.top = rect.top + 'px';
-    document.body.appendChild(flyingBox);
-    flyingBoxesToMergeArea.push(flyingBox);
-    box.classList.add('fade-out');
-  }
-
-  const mergeAreaRect = mergeArea.getBoundingClientRect();
-  let currentX = mergeAreaRect.left;
-  for (let i = 0; i < flyingBoxesToMergeArea.length; i++) {
-    const flyingBox = flyingBoxesToMergeArea[i];
-    const rect = flyingBox.getBoundingClientRect();
-    flyingBox.style.transform = `translate(${currentX - rect.left}px, ${mergeAreaRect.top - rect.top}px)`;
-    currentX += rect.width + 5;
-  }
-
-  await sleep(500);
-  await checkPause();
-
-  flyingBoxesToMergeArea.forEach(fb => document.body.removeChild(fb));
-
-  let n1 = m - l + 1;
-  let n2 = r - m;
-
-  let L = new Array(n1);
-  let R = new Array(n2);
-
-  for (let i = 0; i < n1; i++) {
-    L[i] = arr[l + i].cloneNode(true);
-    L[i].classList.remove('fade-out');
-  }
-  for (let j = 0; j < n2; j++) {
-    R[j] = arr[m + 1 + j].cloneNode(true);
-    R[j].classList.remove('fade-out');
-  }
-
-  let i = 0;
-  let j = 0;
-  let mergedBoxes = [];
-
-  while (i < n1 && j < n2) {
-    L[i].classList.add('highlight-compare');
-    R[j].classList.add('highlight-compare');
-    await sleep(300);
-    await checkPause();
-
-    let winner;
-    if (parseInt(L[i].textContent) <= parseInt(R[j].textContent)) {
-      winner = L[i];
-      mergedBoxes.push(L[i]);
-      i++;
-    } else {
-      winner = R[j];
-      mergedBoxes.push(R[j]);
-      j++;
-    }
-    winner.classList.remove('highlight-compare');
-    winner.classList.add('highlight-winner');
-    await sleep(300);
-    await checkPause();
-    winner.classList.remove('highlight-winner');
-
-    L.forEach(box => box.classList.remove('highlight-compare'));
-    R.forEach(box => box.classList.remove('highlight-compare'));
-  }
-
-  while (i < n1) {
-    mergedBoxes.push(L[i]);
-    i++;
-  }
-
-  while (j < n2) {
-    mergedBoxes.push(R[j]);
-    j++;
-  }
-
-  mergeArea.innerHTML = '';
-  mergedBoxes.forEach(box => {
-    mergeArea.appendChild(box);
-  });
-  await sleep(500);
-  await checkPause();
-
-  let flyingBoxesToMain = [];
-  for (let i = 0; i < mergedBoxes.length; i++) {
-    const box = mergedBoxes[i];
-    const rect = box.getBoundingClientRect();
-    const flyingBox = box.cloneNode(true);
-    flyingBox.classList.add('flying-box');
-    flyingBox.style.left = rect.left + 'px';
-    flyingBox.style.top = rect.top + 'px';
-    document.body.appendChild(flyingBox);
-    flyingBoxesToMain.push(flyingBox);
-    box.classList.add('fade-out');
-  }
-
-  const mergeSortContainer = document.getElementById('mergesort-container');
-  for (let i = 0; i < mergedBoxes.length; i++) {
-    const flyingBox = flyingBoxesToMain[i];
-    const targetBox = arr[l + i];
-    const rect = targetBox.getBoundingClientRect();
-    flyingBox.style.transform = `translate(${rect.left - flyingBox.getBoundingClientRect().left}px, ${rect.top - flyingBox.getBoundingClientRect().top}px)`;
-  }
-
-  await sleep(500);
-  await checkPause();
-
-  flyingBoxesToMain.forEach(fb => document.body.removeChild(fb));
-
-  for (let i = 0; i < mergedBoxes.length; i++) {
-    arr[l + i] = mergedBoxes[i];
-    arr[l + i].classList.remove('fade-out');
-  }
-
-  mergeSortContainer.innerHTML = '';
-  arr.forEach(box => {
-    mergeSortContainer.appendChild(box);
-  });
-
-  mergeArea.innerHTML = '';
-}
-
-function runMergeSortV5_Divide() {
-  const container = document.getElementById('mergesort-v5-container');
-  container.innerHTML = '';
-  let initialArray = [60, 30, 90, 20, 50, 80, 10, 70, 40, 100];
-
-  function buildTree(arr, level) {
-    let levelContainer = document.getElementById(`level-${level}`);
-    if (!levelContainer) {
-      levelContainer = document.createElement('div');
-      levelContainer.id = `level-${level}`;
-      levelContainer.classList.add('level-container');
-      container.appendChild(levelContainer);
-    }
-
-    const subArrayContainer = document.createElement('div');
-    subArrayContainer.classList.add('container');
-    levelContainer.appendChild(subArrayContainer);
-
-    arr.forEach(val => {
-      const box = document.createElement('div');
-      box.classList.add('box');
-      box.style.height = val + 'px';
-      box.textContent = val;
-      subArrayContainer.appendChild(box);
-    });
-
-    const node = {
-      array: arr,
-      container: subArrayContainer,
-      left: null,
-      right: null
-    };
-
-    if (arr.length > 1) {
-      const mid = Math.floor(arr.length / 2);
-      node.left = buildTree(arr.slice(0, mid), level + 1);
-      node.right = buildTree(arr.slice(mid), level + 1);
-    }
-    return node;
-  }
-
-  rootV5 = buildTree(initialArray, 0);
-  container.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  document.getElementById('v5-conquer-btn').disabled = false;
-}
-
-async function runMergeSortV5_Conquer() {
-  document.getElementById('v5-divide-btn').disabled = true;
-  document.getElementById('v5-conquer-btn').disabled = true;
-
-  async function animateMerge(node) {
-    if (!node.left && !node.right) {
-      return node.array;
-    }
-
-    const leftArr = await animateMerge(node.left);
-    const rightArr = await animateMerge(node.right);
-
-    const leftContainer = node.left.container;
-    const rightContainer = node.right.container;
-    const targetContainer = node.container;
-
-    leftContainer.style.backgroundColor = 'rgba(255, 255, 0, 0.2)';
-    rightContainer.style.backgroundColor = 'rgba(255, 255, 0, 0.2)';
-    await sleep(500);
-    await checkPause();
-
-    let merged = [];
-    let l = 0, r = 0;
-
-    targetContainer.innerHTML = ''; // Clear target container before merge
-
-    while (l < leftArr.length && r < rightArr.length) {
-      const leftBox = leftContainer.children[l];
-      const rightBox = rightContainer.children[r];
-
-      leftBox.classList.add('highlight-compare');
-      rightBox.classList.add('highlight-compare');
-      await sleep(300);
-      await checkPause();
-
-      let winnerBox, winnerArr, winnerIndex;
-      if (leftArr[l] <= rightArr[r]) {
-        winnerBox = leftBox;
-        winnerArr = leftArr;
-        winnerIndex = l;
-        merged.push(leftArr[l++]);
-      } else {
-        winnerBox = rightBox;
-        winnerArr = rightArr;
-        winnerIndex = r;
-        merged.push(rightArr[r++]);
-      }
-
-      winnerBox.classList.remove('highlight-compare');
-      winnerBox.classList.add('highlight-winner');
-      await sleep(300);
-      await checkPause();
-
-      const newBox = winnerBox.cloneNode(true);
-      newBox.classList.remove('highlight-winner');
-      targetContainer.appendChild(newBox);
-      winnerBox.classList.add('fade-out');
-
-      leftBox.classList.remove('highlight-compare');
-      rightBox.classList.remove('highlight-compare');
-    }
-
-    while (l < leftArr.length) {
-        const box = leftContainer.children[l];
-        targetContainer.appendChild(box.cloneNode(true));
-        box.classList.add('fade-out');
-        merged.push(leftArr[l++]);
-    }
-    while (r < rightArr.length) {
-        const box = rightContainer.children[r];
-        targetContainer.appendChild(box.cloneNode(true));
-        box.classList.add('fade-out');
-        merged.push(rightArr[r++]);
-    }
-
-    node.array = merged;
-    leftContainer.style.backgroundColor = '';
-    rightContainer.style.backgroundColor = '';
-    await sleep(500);
-    await checkPause();
-    return merged;
-  }
-
-  await animateMerge(rootV5);
-  document.getElementById('v5-divide-btn').disabled = false;
-}
-
-</script>
-</body>
+    <head>
+        <title>Sorting Algorithm Visualization</title>
+        <style>
+            body {
+                font-family: sans-serif;
+                transition: all 0.5s ease-in-out;
+            }
+            .dark-theme {
+                background-color: #222;
+                color: #eee;
+            }
+            .container {
+                display: flex;
+                align-items: flex-end;
+                height: 200px;
+                border: 1px solid #eee;
+                position: relative;
+            }
+            .box {
+                width: 50px;
+                background-color: #44b;
+                border: 1px solid #88f;
+                margin-right: 5px;
+                text-align: center;
+                color: #eee;
+                position: relative;
+                transition: all 0.5s ease-in-out;
+            }
+            .arrow-container {
+                position: relative;
+                height: 50px;
+                margin-top: 10px;
+            }
+            .arrow {
+                width: 0;
+                height: 0;
+                border-left: 10px solid transparent;
+                border-right: 10px solid transparent;
+                border-bottom: 20px solid red;
+                position: absolute;
+                left: 20px;
+                transition: all 0.5s ease-in-out;
+            }
+            #minIndexMarker {
+                width: 20px;
+                height: 20px;
+                background-color: yellow;
+                position: absolute;
+                left: 15px;
+                top: 25px;
+                border-radius: 50%;
+                transition: all 0.5s ease-in-out;
+            }
+            .comparison {
+                margin-top: 10px;
+                font-size: 1.2em;
+                font-weight: bold;
+                height: 30px;
+                transition: background-color 0.5s ease-in-out;
+            }
+            .highlight-true {
+                background-color: green;
+            }
+            .highlight-compare {
+                background-color: red;
+            }
+            .highlight-winner {
+                background-color: green;
+            }
+            button {
+                margin-top: 10px;
+                font-size: 1.2em;
+                background-color: #444;
+                color: #eee;
+                border: 1px solid #888;
+            }
+            #description {
+                margin-bottom: 20px;
+                max-width: 600px;
+            }
+            .controls {
+                margin-top: 10px;
+            }
+            #merge-area {
+                margin-top: 10px;
+                transition: opacity 0.5s ease-in-out;
+            }
+            .fade-out {
+                opacity: 0;
+            }
+            .fade-in {
+                opacity: 1;
+            }
+            .flying-box {
+                position: absolute;
+                transition: all 0.5s ease-in-out;
+            }
+            .level-container {
+                display: flex;
+                justify-content: space-around;
+                align-items: flex-end;
+                border: none;
+                height: auto;
+                min-height: 120px;
+            }
+            .pivot {
+                background-color: orange !important;
+            }
+            .partition {
+                background-color: purple !important;
+            }
+        </style>
+    </head>
+    <body class="dark-theme">
+        <h1>Selection Sort Visualization</h1>
+        <div id="description">
+            <h2>How Selection Sort Works</h2>
+            <p>
+                Selection sort is a simple sorting algorithm that divides the
+                input list into two parts: a sorted part at the left end and an
+                unsorted part at the right end. Initially, the sorted part is
+                empty and the unsorted part is the entire list.
+            </p>
+            <p>
+                The algorithm proceeds by finding the smallest (or largest,
+                depending on sorting order) element in the unsorted part and
+                swapping it with the leftmost unsorted element, moving the
+                boundary between the sorted and unsorted parts one element to
+                the right.
+            </p>
+        </div>
+        <div class="container" id="container">
+            <div class="box" style="height: 60px">60</div>
+            <div class="box" style="height: 30px">30</div>
+            <div class="box" style="height: 90px">90</div>
+            <div class="box" style="height: 20px">20</div>
+            <div class="box" style="height: 50px">50</div>
+            <div class="box" style="height: 80px">80</div>
+            <div class="box" style="height: 10px">10</div>
+            <div class="box" style="height: 70px">70</div>
+            <div class="box" style="height: 40px">40</div>
+            <div class="box" style="height: 100px">100</div>
+        </div>
+        <div class="arrow-container">
+            <div class="arrow" id="arrow"></div>
+            <div id="minIndexMarker"></div>
+        </div>
+        <div class="comparison" id="comparison"></div>
+        <div class="controls">
+            <button onclick="selectionSort()">Sort</button>
+            <button id="pauseBtn" onclick="togglePause()">Pause</button>
+            <button onclick="location.reload()">Reset</button>
+            <label for="speedSlider">Step (ms):</label>
+            <input
+                type="range"
+                id="speedSlider"
+                min="100"
+                max="2000"
+                value="1000"
+                step="100"
+            />
+        </div>
+
+        <hr />
+        <h2>Merge Sort Visualization v4</h2>
+        <div id="description-mergesort">
+            <h2>How Merge Sort Works</h2>
+            <p>
+                Merge sort is a classic sorting algorithm that follows the
+                "divide and conquer" paradigm. It works in three main phases:
+            </p>
+            <ol>
+                <li>
+                    <b>Divide:</b> The algorithm starts by dividing the unsorted
+                    list into two (ideally) equal halves. It then continues to
+                    recursively divide each of these halves into smaller
+                    sub-lists until each sub-list contains only one element. A
+                    list with a single element is considered inherently sorted.
+                </li>
+                <li>
+                    <b>Conquer (Merge):</b> Once the lists are divided down to
+                    single elements, the algorithm begins to merge them back
+                    together. It takes two adjacent sub-lists and merges them
+                    into a single, sorted list.
+                </li>
+                <li>
+                    <b>Combine:</b> This merging process is repeated, taking the
+                    newly sorted sub-lists and merging them, until we are left
+                    with a single, completely sorted list. The key to the
+                    algorithm is the merging step, where elements from the two
+                    sub-lists are compared and placed in the correct order in
+                    the new list.
+                </li>
+            </ol>
+        </div>
+        <div class="container" id="mergesort-container">
+            <div class="box" style="height: 60px">60</div>
+            <div class="box" style="height: 30px">30</div>
+            <div class="box" style="height: 90px">90</div>
+            <div class="box" style="height: 20px">20</div>
+            <div class="box" style="height: 50px">50</div>
+            <div class="box" style="height: 80px">80</div>
+            <div class="box" style="height: 10px">10</div>
+            <div class="box" style="height: 70px">70</div>
+            <div class="box" style="height: 40px">40</div>
+            <div class="box" style="height: 100px">100</div>
+        </div>
+        <div class="controls">
+            <button onclick="runMergeSort()">Sort Merge Sort v4</button>
+        </div>
+        <div id="merge-area" class="container"></div>
+
+        <hr />
+        <h2>Merge Sort Visualization v5</h2>
+        <div id="mergesort-v5-container"></div>
+        <div class="controls">
+            <button id="v5-divide-btn" onclick="runMergeSortV5_Divide()">
+                1. Divide
+            </button>
+            <button
+                id="v5-conquer-btn"
+                onclick="runMergeSortV5_Conquer()"
+                disabled
+            >
+                2. Conquer (Merge)
+            </button>
+        </div>
+
+        <hr />
+        <h2>Quicksort Visualization</h2>
+        <div id="description-quicksort">
+            <h2>How Quicksort Works</h2>
+            <p>
+                Quicksort is a highly efficient sorting algorithm that, like
+                Merge Sort, follows the "divide and conquer" paradigm. Its core
+                idea is to pick an element as a "pivot" and partition the array
+                around it.
+            </p>
+            <ol>
+                <li>
+                    <b>Partitioning:</b> The key step is the partitioning
+                    process. An element from the array is chosen as the pivot.
+                    The algorithm then rearranges the array so that all elements
+                    smaller than the pivot are moved to its left, and all
+                    elements greater than the pivot are moved to its right. The
+                    pivot itself ends up in its final sorted position.
+                </li>
+                <li>
+                    <b>Recursion:</b> After partitioning, the pivot is in its
+                    correct place. The algorithm then recursively applies the
+                    same process to the two sub-arrays: the one to the left of
+                    the pivot and the one to the right.
+                </li>
+            </ol>
+            <p>
+                This process continues until the entire array is sorted. The
+                choice of the pivot can significantly impact the algorithm's
+                performance. In this visualization, we will use the last element
+                as the pivot.
+            </p>
+        </div>
+        <div class="container" id="quicksort-container">
+            <div class="box" style="height: 60px">60</div>
+            <div class="box" style="height: 30px">30</div>
+            <div class="box" style="height: 90px">90</div>
+            <div class="box" style="height: 20px">20</div>
+            <div class="box" style="height: 50px">50</div>
+            <div class="box" style="height: 80px">80</div>
+            <div class="box" style="height: 10px">10</div>
+            <div class="box" style="height: 70px">70</div>
+            <div class="box" style="height: 40px">40</div>
+            <div class="box" style="height: 100px">100</div>
+        </div>
+        <div class="controls">
+            <button onclick="runQuickSort()">Sort Quicksort</button>
+        </div>
+
+        <script>
+            const container = document.getElementById("container");
+            const comparisonEl = document.getElementById("comparison");
+            const arrow = document.getElementById("arrow");
+            const minIndexMarker = document.getElementById("minIndexMarker");
+            const pauseBtn = document.getElementById("pauseBtn");
+            const speedSlider = document.getElementById("speedSlider");
+            let boxes = Array.from(
+                document.querySelectorAll("#container .box"),
+            );
+            let isPaused = false;
+            let rootV5; // To store the root of the v5 tree
+
+            function togglePause() {
+                isPaused = !isPaused;
+                pauseBtn.textContent = isPaused ? "Resume" : "Pause";
+            }
+
+            function sleep(ms) {
+                return new Promise((resolve) =>
+                    setTimeout(resolve, ms * (speedSlider.value / 1000)),
+                );
+            }
+
+            async function checkPause() {
+                while (isPaused) {
+                    await sleep(100);
+                }
+            }
+
+            async function swap(el1, el2) {
+                const style1 = window.getComputedStyle(el1);
+                const style2 = window.getComputedStyle(el2);
+
+                const transform1 = style1.getPropertyValue("transform");
+                const transform2 = style2.getPropertyValue("transform");
+
+                el1.style.transform = transform2;
+                el2.style.transform = transform1;
+
+                await sleep(500);
+                await checkPause();
+
+                let temp = el1.cloneNode(true);
+                el1.parentNode.insertBefore(temp, el2);
+                el2.parentNode.insertBefore(el1, temp);
+                el2.parentNode.removeChild(temp);
+            }
+
+            async function selectionSort() {
+                let n = boxes.length;
+                for (let i = 0; i < n - 1; i++) {
+                    let minIndex = i;
+                    arrow.style.left = i * 55 + 20 + "px";
+                    minIndexMarker.style.left = minIndex * 55 + 15 + "px";
+                    await sleep(500);
+                    await checkPause();
+
+                    for (let j = i + 1; j < n; j++) {
+                        arrow.style.left = j * 55 + 20 + "px";
+                        await sleep(200);
+                        await checkPause();
+
+                        let val1 = parseInt(boxes[minIndex].textContent);
+                        let val2 = parseInt(boxes[j].textContent);
+
+                        comparisonEl.textContent = `${val1} > ${val2}`;
+                        if (val2 < val1) {
+                            comparisonEl.classList.add("highlight-true");
+                        }
+                        await sleep(500);
+                        await checkPause();
+                        comparisonEl.textContent = "";
+                        if (val2 < val1) {
+                            comparisonEl.classList.remove("highlight-true");
+                            minIndex = j;
+                            minIndexMarker.style.left =
+                                minIndex * 55 + 15 + "px";
+                        }
+                    }
+
+                    if (minIndex !== i) {
+                        comparisonEl.textContent = `Swapping ${boxes[i].textContent} and ${boxes[minIndex].textContent}`;
+                        await sleep(500);
+                        await checkPause();
+
+                        const box1 = boxes[i];
+                        const box2 = boxes[minIndex];
+
+                        const rect1 = box1.getBoundingClientRect();
+                        const rect2 = box2.getBoundingClientRect();
+
+                        const x1 = rect2.left - rect1.left;
+                        const x2 = rect1.left - rect2.left;
+
+                        box1.style.transform = `translate(${x1}px, 20px)`;
+                        box2.style.transform = `translate(${x2}px, -20px)`;
+
+                        await sleep(500);
+                        await checkPause();
+
+                        box1.style.transform = `translate(${x1}px, 0px)`;
+                        box2.style.transform = `translate(${x2}px, 0px)`;
+
+                        await sleep(500);
+                        await checkPause();
+
+                        [boxes[i], boxes[minIndex]] = [
+                            boxes[minIndex],
+                            boxes[i],
+                        ];
+
+                        container.innerHTML = "";
+                        boxes.forEach((box) => {
+                            box.style.transform = "";
+                            container.appendChild(box);
+                        });
+
+                        await sleep(500);
+                        await checkPause();
+                        comparisonEl.textContent = "";
+                    }
+                }
+            }
+
+            async function runMergeSort() {
+                let mergeSortBoxes = Array.from(
+                    document.querySelectorAll("#mergesort-container .box"),
+                );
+                await mergeSort(mergeSortBoxes, 0, mergeSortBoxes.length - 1);
+            }
+
+            async function mergeSort(arr, l, r) {
+                if (l >= r) {
+                    return;
+                }
+                let m = l + Math.floor((r - l) / 2);
+                await mergeSort(arr, l, m);
+                await mergeSort(arr, m + 1, r);
+                await merge(arr, l, m, r);
+            }
+
+            async function merge(arr, l, m, r) {
+                const mergeArea = document.getElementById("merge-area");
+                mergeArea.innerHTML = "";
+
+                let flyingBoxesToMergeArea = [];
+                for (let i = l; i <= r; i++) {
+                    const box = arr[i];
+                    const rect = box.getBoundingClientRect();
+                    const flyingBox = box.cloneNode(true);
+                    flyingBox.classList.add("flying-box");
+                    flyingBox.style.left = rect.left + "px";
+                    flyingBox.style.top = rect.top + "px";
+                    document.body.appendChild(flyingBox);
+                    flyingBoxesToMergeArea.push(flyingBox);
+                    box.classList.add("fade-out");
+                }
+
+                const mergeAreaRect = mergeArea.getBoundingClientRect();
+                let currentX = mergeAreaRect.left;
+                for (let i = 0; i < flyingBoxesToMergeArea.length; i++) {
+                    const flyingBox = flyingBoxesToMergeArea[i];
+                    const rect = flyingBox.getBoundingClientRect();
+                    flyingBox.style.transform = `translate(${currentX - rect.left}px, ${mergeAreaRect.top - rect.top}px)`;
+                    currentX += rect.width + 5;
+                }
+
+                await sleep(500);
+                await checkPause();
+
+                flyingBoxesToMergeArea.forEach((fb) =>
+                    document.body.removeChild(fb),
+                );
+
+                let n1 = m - l + 1;
+                let n2 = r - m;
+
+                let L = new Array(n1);
+                let R = new Array(n2);
+
+                for (let i = 0; i < n1; i++) {
+                    L[i] = arr[l + i].cloneNode(true);
+                    L[i].classList.remove("fade-out");
+                }
+                for (let j = 0; j < n2; j++) {
+                    R[j] = arr[m + 1 + j].cloneNode(true);
+                    R[j].classList.remove("fade-out");
+                }
+
+                let i = 0;
+                let j = 0;
+                let mergedBoxes = [];
+
+                while (i < n1 && j < n2) {
+                    L[i].classList.add("highlight-compare");
+                    R[j].classList.add("highlight-compare");
+                    await sleep(300);
+                    await checkPause();
+
+                    let winner;
+                    if (
+                        parseInt(L[i].textContent) <= parseInt(R[j].textContent)
+                    ) {
+                        winner = L[i];
+                        mergedBoxes.push(L[i]);
+                        i++;
+                    } else {
+                        winner = R[j];
+                        mergedBoxes.push(R[j]);
+                        j++;
+                    }
+                    winner.classList.remove("highlight-compare");
+                    winner.classList.add("highlight-winner");
+                    await sleep(300);
+                    await checkPause();
+                    winner.classList.remove("highlight-winner");
+
+                    L.forEach((box) =>
+                        box.classList.remove("highlight-compare"),
+                    );
+                    R.forEach((box) =>
+                        box.classList.remove("highlight-compare"),
+                    );
+                }
+
+                while (i < n1) {
+                    mergedBoxes.push(L[i]);
+                    i++;
+                }
+
+                while (j < n2) {
+                    mergedBoxes.push(R[j]);
+                    j++;
+                }
+
+                mergeArea.innerHTML = "";
+                mergedBoxes.forEach((box) => {
+                    mergeArea.appendChild(box);
+                });
+                await sleep(500);
+                await checkPause();
+
+                let flyingBoxesToMain = [];
+                for (let i = 0; i < mergedBoxes.length; i++) {
+                    const box = mergedBoxes[i];
+                    const rect = box.getBoundingClientRect();
+                    const flyingBox = box.cloneNode(true);
+                    flyingBox.classList.add("flying-box");
+                    flyingBox.style.left = rect.left + "px";
+                    flyingBox.style.top = rect.top + "px";
+                    document.body.appendChild(flyingBox);
+                    flyingBoxesToMain.push(flyingBox);
+                    box.classList.add("fade-out");
+                }
+
+                const mergeSortContainer = document.getElementById(
+                    "mergesort-container",
+                );
+                for (let i = 0; i < mergedBoxes.length; i++) {
+                    const flyingBox = flyingBoxesToMain[i];
+                    const targetBox = arr[l + i];
+                    const rect = targetBox.getBoundingClientRect();
+                    flyingBox.style.transform = `translate(${rect.left - flyingBox.getBoundingClientRect().left}px, ${rect.top - flyingBox.getBoundingClientRect().top}px)`;
+                }
+
+                await sleep(500);
+                await checkPause();
+
+                flyingBoxesToMain.forEach((fb) =>
+                    document.body.removeChild(fb),
+                );
+
+                for (let i = 0; i < mergedBoxes.length; i++) {
+                    arr[l + i] = mergedBoxes[i];
+                    arr[l + i].classList.remove("fade-out");
+                }
+
+                mergeSortContainer.innerHTML = "";
+                arr.forEach((box) => {
+                    mergeSortContainer.appendChild(box);
+                });
+
+                mergeArea.innerHTML = "";
+            }
+
+            function runMergeSortV5_Divide() {
+                const container = document.getElementById(
+                    "mergesort-v5-container",
+                );
+                container.innerHTML = "";
+                let initialArray = [60, 30, 90, 20, 50, 80, 10, 70, 40, 100];
+
+                function buildTree(arr, level) {
+                    let levelContainer = document.getElementById(
+                        `level-${level}`,
+                    );
+                    if (!levelContainer) {
+                        levelContainer = document.createElement("div");
+                        levelContainer.id = `level-${level}`;
+                        levelContainer.classList.add("level-container");
+                        container.appendChild(levelContainer);
+                    }
+
+                    const subArrayContainer = document.createElement("div");
+                    subArrayContainer.classList.add("container");
+                    levelContainer.appendChild(subArrayContainer);
+
+                    arr.forEach((val) => {
+                        const box = document.createElement("div");
+                        box.classList.add("box");
+                        box.style.height = val + "px";
+                        box.textContent = val;
+                        subArrayContainer.appendChild(box);
+                    });
+
+                    const node = {
+                        array: arr,
+                        container: subArrayContainer,
+                        left: null,
+                        right: null,
+                    };
+
+                    if (arr.length > 1) {
+                        const mid = Math.floor(arr.length / 2);
+                        node.left = buildTree(arr.slice(0, mid), level + 1);
+                        node.right = buildTree(arr.slice(mid), level + 1);
+                    }
+                    return node;
+                }
+
+                rootV5 = buildTree(initialArray, 0);
+                container.scrollIntoView({ behavior: "smooth", block: "end" });
+                document.getElementById("v5-conquer-btn").disabled = false;
+            }
+
+            async function runMergeSortV5_Conquer() {
+                document.getElementById("v5-divide-btn").disabled = true;
+                document.getElementById("v5-conquer-btn").disabled = true;
+
+                async function animateMerge(node) {
+                    if (!node.left && !node.right) {
+                        return node.array;
+                    }
+
+                    const leftArr = await animateMerge(node.left);
+                    const rightArr = await animateMerge(node.right);
+
+                    const leftContainer = node.left.container;
+                    const rightContainer = node.right.container;
+                    const targetContainer = node.container;
+
+                    leftContainer.style.backgroundColor =
+                        "rgba(255, 255, 0, 0.2)";
+                    rightContainer.style.backgroundColor =
+                        "rgba(255, 255, 0, 0.2)";
+                    await sleep(500);
+                    await checkPause();
+
+                    let merged = [];
+                    let l = 0,
+                        r = 0;
+
+                    targetContainer.innerHTML = ""; // Clear target container before merge
+
+                    while (l < leftArr.length && r < rightArr.length) {
+                        const leftBox = leftContainer.children[l];
+                        const rightBox = rightContainer.children[r];
+
+                        leftBox.classList.add("highlight-compare");
+                        rightBox.classList.add("highlight-compare");
+                        await sleep(300);
+                        await checkPause();
+
+                        let winnerBox, winnerArr, winnerIndex;
+                        if (leftArr[l] <= rightArr[r]) {
+                            winnerBox = leftBox;
+                            winnerArr = leftArr;
+                            winnerIndex = l;
+                            merged.push(leftArr[l++]);
+                        } else {
+                            winnerBox = rightBox;
+                            winnerArr = rightArr;
+                            winnerIndex = r;
+                            merged.push(rightArr[r++]);
+                        }
+
+                        winnerBox.classList.remove("highlight-compare");
+                        winnerBox.classList.add("highlight-winner");
+                        await sleep(300);
+                        await checkPause();
+
+                        const newBox = winnerBox.cloneNode(true);
+                        newBox.classList.remove("highlight-winner");
+                        targetContainer.appendChild(newBox);
+                        winnerBox.classList.add("fade-out");
+
+                        leftBox.classList.remove("highlight-compare");
+                        rightBox.classList.remove("highlight-compare");
+                    }
+
+                    while (l < leftArr.length) {
+                        const box = leftContainer.children[l];
+                        targetContainer.appendChild(box.cloneNode(true));
+                        box.classList.add("fade-out");
+                        merged.push(leftArr[l++]);
+                    }
+                    while (r < rightArr.length) {
+                        const box = rightContainer.children[r];
+                        targetContainer.appendChild(box.cloneNode(true));
+                        box.classList.add("fade-out");
+                        merged.push(rightArr[r++]);
+                    }
+
+                    node.array = merged;
+                    leftContainer.style.backgroundColor = "";
+                    rightContainer.style.backgroundColor = "";
+                    await sleep(500);
+                    await checkPause();
+                    return merged;
+                }
+
+                await animateMerge(rootV5);
+
+                document.getElementById("v5-divide-btn").disabled = false;
+            }
+
+            async function runQuickSort() {
+                let quickSortBoxes = Array.from(
+                    document.querySelectorAll("#quicksort-container .box"),
+                );
+
+                await quickSort(quickSortBoxes, 0, quickSortBoxes.length - 1);
+            }
+
+            async function quickSort(arr, low, high) {
+                if (low < high) {
+                    let pi = await partition(arr, low, high);
+
+                    await quickSort(arr, low, pi - 1);
+
+                    await quickSort(arr, pi + 1, high);
+                }
+            }
+
+            async function partition(arr, low, high) {
+                let pivot = arr[high];
+
+                pivot.classList.add("pivot");
+
+                let i = low - 1;
+
+                for (let j = low; j <= high - 1; j++) {
+                    arr[j].classList.add("partition");
+
+                    await sleep(500);
+
+                    await checkPause();
+
+                    if (
+                        parseInt(arr[j].textContent) <
+                        parseInt(pivot.textContent)
+                    ) {
+                        i++;
+
+                        [arr[i], arr[j]] = [arr[j], arr[i]];
+
+                        updateContainer("quicksort-container", arr);
+
+                        await sleep(500);
+
+                        await checkPause();
+                    }
+
+                    arr[j].classList.remove("partition");
+                }
+
+                [arr[i + 1], arr[high]] = [arr[high], arr[i + 1]];
+
+                updateContainer("quicksort-container", arr);
+
+                pivot.classList.remove("pivot");
+
+                await sleep(500);
+
+                await checkPause();
+
+                return i + 1;
+            }
+
+            function updateContainer(containerId, boxes) {
+                const container = document.getElementById(containerId);
+
+                container.innerHTML = "";
+
+                boxes.forEach((box) => {
+                    container.appendChild(box);
+                });
+            }
+        </script>
+    </body>
 </html>
