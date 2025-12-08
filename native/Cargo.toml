@@ -1,0 +1,18 @@
+[package]
+name = "algo-native"
+version = "0.1.0"
+edition = "2021"
+authors = ["alexFrankfurt"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1.0"
+bytemuck = { version = "1.14", features = ["derive"] }
+egui = "0.26"
+egui-wgpu = "0.26"
+egui-winit = "0.26"
+pollster = "0.3"
+winit = "0.29"
+wgpu = "0.20"
+rand = { version = "0.8", features = ["small_rng"] }
+glam = "0.25"
