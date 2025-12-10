@@ -33,11 +33,14 @@ async fn run() -> Result<()> {
 
     let mut paused = false;
     let window_ref = window;
+    let mut last_time = std::time::Instant::now();
 
     Ok(event_loop.run(move |event, target| {
         let window = window_ref;
         match event {
-            Event::WindowEvent { event, .. } => match event {
+            Event::WindowEvent { event, .. } => {
+                renderer.handle_input(window, &event);
+                match event {
                 WindowEvent::CloseRequested => target.exit(),
                 WindowEvent::Resized(size) => {
                     renderer.resize(size);
@@ -52,16 +55,21 @@ async fn run() -> Result<()> {
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    let now = std::time::Instant::now();
+                    let dt = now - last_time;
+                    last_time = now;
+
                     if !paused {
-                        engine.step();
+                        engine.step(dt);
                     }
-                    if let Err(err) = renderer.render(engine.bars()) {
+                    let (bars, max_val) = engine.bars();
+                    if let Err(err) = renderer.render(bars, max_val, engine.comparisons, engine.operations, engine.time_elapsed, engine.current_memory, engine.peak_memory, engine.current_animation.clone(), &engine.temp_array, dt, window) {
                         eprintln!("Render error: {err:?}");
                         target.exit();
                     }
                 }
                 _ => {}
-            },
+            }},
             Event::AboutToWait => {
                 window.request_redraw();
             }

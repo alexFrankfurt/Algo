@@ -10,12 +10,13 @@ struct Globals {
 var<uniform> globals: Globals;
 
 struct VertexIn {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) offset: f32,
-    @location(3) height: f32,
-    @location(4) z: f32,
-    @location(5) state: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) offset: f32,
+    @location(4) height: f32,
+    @location(5) z: f32,
+    @location(6) state: u32,
 };
 
 struct VertexOut {
@@ -23,6 +24,7 @@ struct VertexOut {
     @location(0) uv: vec2<f32>,
     @location(1) state: u32,
     @location(2) screen_uv: vec2<f32>,
+    @location(3) normal: vec3<f32>,
 };
 
 fn select_state_color(state: u32) -> vec4<f32> {
@@ -31,22 +33,29 @@ fn select_state_color(state: u32) -> vec4<f32> {
         case 0u: { return vec4<f32>(0.42, 0.78, 1.00, 0.55); }
         // compare
         case 1u: { return vec4<f32>(1.00, 0.75, 0.35, 0.65); }
-        // swap
+        // swap (target - receiving value)
         case 2u: { return vec4<f32>(1.00, 0.45, 0.65, 0.70); }
         // sorted
         case 3u: { return vec4<f32>(0.65, 1.00, 0.75, 0.60); }
+        // source (providing value) - cyan/teal highlight
+        case 4u: { return vec4<f32>(0.35, 0.95, 0.90, 0.70); }
+        // temp array - purple/violet
+        case 5u: { return vec4<f32>(0.75, 0.50, 1.00, 0.65); }
         default: { return vec4<f32>(0.70, 0.70, 0.90, 0.50); }
     }
 }
 
 @vertex
 fn vs_main(input: VertexIn) -> VertexOut {
-    // World-space bar quad in a simple strip; bar_width is already in NDC scale (2.0 / count)
+    // World-space bar cube
     // Slightly slimmer bars to create visible gaps between them
     let width_scale = 0.7;
     let world_x = input.offset + input.position.x * globals.bar_width * width_scale;
     let world_y = input.position.y * input.height * 1.25;
-    let world = vec4<f32>(world_x, world_y, input.z, 1.0);
+    // Make depth proportional to width for a square footprint
+    let world_z = input.z + input.position.z * globals.bar_width * width_scale;
+    
+    let world = vec4<f32>(world_x, world_y, world_z, 1.0);
 
     var out: VertexOut;
     let clip = globals.view_proj * world;
@@ -55,6 +64,7 @@ fn vs_main(input: VertexIn) -> VertexOut {
     out.state = input.state;
     // Screen-space UV (0..1) for sampling scene texture
     out.screen_uv = 0.5 * (clip.xy / clip.w) + vec2<f32>(0.5, 0.5);
+    out.normal = input.normal;
     return out;
 }
 
@@ -81,7 +91,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
     // Simple glass Fresnel rim (view ~ camera looking down -Z)
     let view_dir = normalize(vec3<f32>(0.0, 0.0, 1.0));
-    let normal = vec3<f32>(0.0, 0.0, 1.0);
+    let normal = normalize(input.normal);
     let fresnel = pow(1.0 - max(dot(view_dir, normal), 0.0), 3.0);
     let rim = vec3<f32>(0.55, 0.95, 1.35) * fresnel * 1.0;
 

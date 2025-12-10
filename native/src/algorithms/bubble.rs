@@ -12,6 +12,8 @@ pub fn bubble_sort_actions(values: &[u32]) -> Vec<Action> {
                 i: j,
                 j: j + 1,
                 value: 0,
+                memory: 0,
+                temp_idx: 0,
             });
             if arr[j] > arr[j + 1] {
                 arr.swap(j, j + 1);
@@ -20,6 +22,8 @@ pub fn bubble_sort_actions(values: &[u32]) -> Vec<Action> {
                     i: j,
                     j: j + 1,
                     value: 0,
+                    memory: 0,
+                    temp_idx: 0,
                 });
             }
         }
@@ -28,6 +32,8 @@ pub fn bubble_sort_actions(values: &[u32]) -> Vec<Action> {
             i: n - 1 - i,
             j: n - 1 - i,
             value: arr[n - 1 - i],
+            memory: 0,
+            temp_idx: 0,
         });
     }
 

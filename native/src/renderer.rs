@@ -2,16 +2,17 @@ use std::mem;
 
 use anyhow::Result;
 use wgpu::util::DeviceExt;
-use winit::{dpi::PhysicalSize, window::Window};
+use winit::{dpi::PhysicalSize, window::Window, event::WindowEvent};
 
 use glam::{Mat4, Vec3};
 
-use crate::engine::{Bar, BarState};
+use crate::engine::{Bar, AnimationInfo, TempArrayState};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BarVertex {
-    position: [f32; 2],
+    position: [f32; 3],
+    normal: [f32; 3],
     uv: [f32; 2],
 }
 
@@ -102,6 +103,16 @@ pub struct Renderer<'a> {
     // Layouts kept for resize
     tex_samp_layout: wgpu::BindGroupLayout,
     tex_samp_double_layout: wgpu::BindGroupLayout,
+
+    // Egui
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+
+    // Animation state
+    animated_heights: Vec<f32>,
+    animated_offsets: Vec<f32>,  // X position offsets for animation
+    flying_bar_progress: f32,    // 0.0 to 1.0 for flying bar animation
 }
 
 impl<'a> Renderer<'a> {
@@ -149,14 +160,48 @@ impl<'a> Renderer<'a> {
         };
         surface.configure(&device, &config);
 
-        // Bar geometry
+        // Bar geometry (Cube)
+        // X: -0.5..0.5, Y: 0.0..1.0, Z: -0.5..0.5
         let bar_vertices = [
-            BarVertex { position: [-0.5, 0.0], uv: [0.0, 0.0] },
-            BarVertex { position: [0.5, 0.0], uv: [1.0, 0.0] },
-            BarVertex { position: [0.5, 1.0], uv: [1.0, 1.0] },
-            BarVertex { position: [-0.5, 1.0], uv: [0.0, 1.0] },
+            // Front face (Z+)
+            BarVertex { position: [-0.5, 0.0, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] },
+            BarVertex { position: [ 0.5, 0.0, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0] },
+            BarVertex { position: [ 0.5, 1.0, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0] },
+            BarVertex { position: [-0.5, 1.0, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0] },
+            // Back face (Z-)
+            BarVertex { position: [ 0.5, 0.0, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0] },
+            BarVertex { position: [-0.5, 0.0, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0] },
+            BarVertex { position: [-0.5, 1.0, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0] },
+            BarVertex { position: [ 0.5, 1.0, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0] },
+            // Left face (X-)
+            BarVertex { position: [-0.5, 0.0, -0.5], normal: [-1.0, 0.0, 0.0], uv: [0.0, 0.0] },
+            BarVertex { position: [-0.5, 0.0,  0.5], normal: [-1.0, 0.0, 0.0], uv: [1.0, 0.0] },
+            BarVertex { position: [-0.5, 1.0,  0.5], normal: [-1.0, 0.0, 0.0], uv: [1.0, 1.0] },
+            BarVertex { position: [-0.5, 1.0, -0.5], normal: [-1.0, 0.0, 0.0], uv: [0.0, 1.0] },
+            // Right face (X+)
+            BarVertex { position: [ 0.5, 0.0,  0.5], normal: [1.0, 0.0, 0.0], uv: [0.0, 0.0] },
+            BarVertex { position: [ 0.5, 0.0, -0.5], normal: [1.0, 0.0, 0.0], uv: [1.0, 0.0] },
+            BarVertex { position: [ 0.5, 1.0, -0.5], normal: [1.0, 0.0, 0.0], uv: [1.0, 1.0] },
+            BarVertex { position: [ 0.5, 1.0,  0.5], normal: [1.0, 0.0, 0.0], uv: [0.0, 1.0] },
+            // Top face (Y+)
+            BarVertex { position: [-0.5, 1.0,  0.5], normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] },
+            BarVertex { position: [ 0.5, 1.0,  0.5], normal: [0.0, 1.0, 0.0], uv: [1.0, 0.0] },
+            BarVertex { position: [ 0.5, 1.0, -0.5], normal: [0.0, 1.0, 0.0], uv: [1.0, 1.0] },
+            BarVertex { position: [-0.5, 1.0, -0.5], normal: [0.0, 1.0, 0.0], uv: [0.0, 1.0] },
+            // Bottom face (Y-)
+            BarVertex { position: [-0.5, 0.0, -0.5], normal: [0.0, -1.0, 0.0], uv: [0.0, 0.0] },
+            BarVertex { position: [ 0.5, 0.0, -0.5], normal: [0.0, -1.0, 0.0], uv: [1.0, 0.0] },
+            BarVertex { position: [ 0.5, 0.0,  0.5], normal: [0.0, -1.0, 0.0], uv: [1.0, 1.0] },
+            BarVertex { position: [-0.5, 0.0,  0.5], normal: [0.0, -1.0, 0.0], uv: [0.0, 1.0] },
         ];
-        let bar_indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
+        let bar_indices: [u16; 36] = [
+            0, 1, 2, 0, 2, 3,       // Front
+            4, 5, 6, 4, 6, 7,       // Back
+            8, 9, 10, 8, 10, 11,    // Left
+            12, 13, 14, 12, 14, 15, // Right
+            16, 17, 18, 16, 18, 19, // Top
+            20, 21, 22, 20, 22, 23, // Bottom
+        ];
         let bar_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("BarVertexBuffer"),
             contents: bytemuck::cast_slice(&bar_vertices),
@@ -461,12 +506,12 @@ impl<'a> Renderer<'a> {
                     wgpu::VertexBufferLayout {
                         array_stride: mem::size_of::<BarVertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                     },
                     wgpu::VertexBufferLayout {
                         array_stride: mem::size_of::<Instance>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![2 => Float32, 3 => Float32, 4 => Float32, 5 => Uint32],
+                        attributes: &wgpu::vertex_attr_array![3 => Float32, 4 => Float32, 5 => Float32, 6 => Uint32],
                     },
                 ],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -783,6 +828,17 @@ impl<'a> Renderer<'a> {
             multiview: None,
         });
 
+        // Egui setup
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+
         Ok(Self {
             surface,
             device,
@@ -822,7 +878,17 @@ impl<'a> Renderer<'a> {
             bar_floor_bind,
             tex_samp_layout,
             tex_samp_double_layout,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            animated_heights: Vec::new(),
+            animated_offsets: Vec::new(),
+            flying_bar_progress: 0.0,
         })
+    }
+
+    pub fn handle_input(&mut self, window: &Window, event: &WindowEvent) {
+        let _ = self.egui_state.on_window_event(window, event);
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -915,33 +981,168 @@ impl<'a> Renderer<'a> {
         });
     }
 
-    pub fn render(&mut self, bars_and_max: (&[Bar], u32)) -> Result<()> {
-        let (bars, max_value) = bars_and_max;
+    pub fn render(&mut self, bars: &[Bar], max_value: u32, comparisons: usize, operations: usize, time_elapsed: std::time::Duration, current_memory: usize, peak_memory: usize, animation: AnimationInfo, temp_array: &TempArrayState, dt: std::time::Duration, window: &Window) -> Result<()> {
         if bars.is_empty() {
             return Ok(());
         }
 
-        let count = bars.len() as f32;
-        let max_val = max_value.max(1) as f32;
-        let bar_width = 2.0 / count;
+        let array_size = bars.len();
+        let base_memory = array_size * 4; // 4 bytes per u32 element
+        let dt_secs = dt.as_secs_f32();
 
-        let instances: Vec<Instance> = bars
+        // Initialize or resize animated heights/offsets if needed
+        if self.animated_heights.len() != bars.len() {
+            let max_val = max_value.max(1) as f32;
+            self.animated_heights = bars.iter().map(|b| b.value as f32 / max_val).collect();
+            self.animated_offsets = vec![0.0; bars.len()];
+        }
+
+        // Animate heights towards targets
+        let max_val = max_value.max(1) as f32;
+        let animation_speed = 8.0; // How fast bars animate (higher = faster)
+        for (i, bar) in bars.iter().enumerate() {
+            let target = bar.value as f32 / max_val;
+            let current = self.animated_heights[i];
+            // Smooth exponential interpolation
+            self.animated_heights[i] = current + (target - current) * (1.0 - (-animation_speed * dt_secs).exp());
+        }
+
+        // Update flying bar progress
+        if animation.active {
+            // Progress the flying animation
+            self.flying_bar_progress = (self.flying_bar_progress + dt_secs * 3.0).min(1.0);
+        } else {
+            self.flying_bar_progress = 0.0;
+        }
+
+        // Egui update
+        let raw_input = self.egui_state.take_egui_input(window);
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Window::new("Algorithm Stats")
+                .default_pos([10.0, 10.0])
+                .show(ctx, |ui| {
+                    ui.heading("Merge Sort");
+                    ui.separator();
+                    ui.label(format!("Time Elapsed: {:.2} s", time_elapsed.as_secs_f32()));
+                    ui.label(format!("Comparisons: {}", comparisons));
+                    ui.label(format!("Operations: {}", operations));
+                    ui.separator();
+                    ui.label("Memory Usage:");
+                    ui.label(format!("Array: {} elements × 4 bytes = {} bytes", array_size, base_memory));
+                    ui.label(format!("Temp Arrays: {} bytes", current_memory));
+                    ui.label(format!("Current Total: {} bytes", base_memory + current_memory));
+                    ui.label(format!("Peak Total: {} bytes", base_memory + peak_memory));
+                    ui.separator();
+                    ui.label("Complexity Analysis:");
+                    ui.label("Time: O(n log n)");
+                    ui.label("Space: O(n)");
+                });
+        });
+
+        let count = bars.len() as f32;
+        let bar_width = 2.0 / count;
+        
+        // Shift main array to the left to make room for temp array
+        let main_array_offset = -1.2; // Shift everything left
+
+        let mut instances: Vec<Instance> = bars
             .iter()
             .enumerate()
             .map(|(i, bar)| {
                 let t = if count > 1.0 { i as f32 / (count - 1.0) } else { 0.5 };
-                let offset = -1.0 + bar_width * (i as f32 + 0.5);
+                let offset = main_array_offset + (-1.0 + bar_width * (i as f32 + 0.5));
                 let z_span = 0.6;
                 let z = (t - 0.5) * z_span;
-                let h = (bar.value as f32 / max_val).clamp(0.0, 1.0);
+                // Use animated height for smooth transitions
+                let h = self.animated_heights[i].clamp(0.0, 1.0);
                 Instance {
                     offset,
                     height: h,
                     z,
-                    state: 0,
+                    state: bar.state as u32,
                 }
             })
             .collect();
+
+        // Add temp array visualization (bars to the right, same height as main)
+        // Position temp array on the right side with gap from main array
+        let temp_x_offset = main_array_offset + 1.2; // To the right of shifted main array
+        let temp_z = 0.0; // Same depth plane for visibility
+        let temp_bar_width = bar_width * 0.6; // Smaller width bars for temp
+        let temp_spacing = 1.8; // Extra spacing multiplier to prevent overlap
+        for (i, &val) in temp_array.values.iter().enumerate() {
+            let h = (val as f32 / max_val).clamp(0.0, 1.0);
+            // Position temp bars horizontally on the right side with more spacing
+            let temp_offset = temp_x_offset + temp_bar_width * (i as f32 + 0.5) * temp_spacing;
+            instances.push(Instance {
+                offset: temp_offset,
+                height: h, // Same height scale as main array
+                z: temp_z,
+                state: 5, // Purple/violet for temp array
+            });
+        }
+
+        // Add flying bar if animation is active
+        if animation.active {
+            let t = self.flying_bar_progress;
+            let eased_t = t * t * (3.0 - 2.0 * t); // Smoothstep
+            
+            if animation.is_temp_push {
+                // Flying from main array to temp array (on the right)
+                let source_offset = main_array_offset + (-1.0 + bar_width * (animation.source_idx as f32 + 0.5));
+                let source_t = if count > 1.0 { animation.source_idx as f32 / (count - 1.0) } else { 0.5 };
+                let z_span = 0.6;
+                let source_z = (source_t - 0.5) * z_span;
+                
+                // Target is in temp array (right side)
+                let temp_count = temp_array.values.len();
+                let target_temp_idx = if temp_count > 0 { temp_count - 1 } else { 0 };
+                let target_offset = temp_x_offset + temp_bar_width * (target_temp_idx as f32 + 0.5) * temp_spacing;
+                let target_z = temp_z;
+                
+                let flying_offset = source_offset + (target_offset - source_offset) * eased_t;
+                let flying_z = source_z + (target_z - source_z) * eased_t;
+                
+                // Arc motion - higher arc for longer distance
+                let arc_height = 0.3 * (1.0 - (2.0 * t - 1.0).powi(2));
+                
+                // Keep height consistent - same as source/target
+                let h = animation.source_height.clamp(0.0, 1.0);
+                
+                instances.push(Instance {
+                    offset: flying_offset,
+                    height: h + arc_height,
+                    z: flying_z,
+                    state: 4, // Cyan for flying
+                });
+            } else if animation.target_idx < bars.len() {
+                // Flying from temp array (right side) to main array
+                let target_offset = main_array_offset + (-1.0 + bar_width * (animation.target_idx as f32 + 0.5));
+                let target_t = if count > 1.0 { animation.target_idx as f32 / (count - 1.0) } else { 0.5 };
+                let z_span = 0.6;
+                let target_z = (target_t - 0.5) * z_span;
+                
+                // Source is front of temp array (index 0, on the right)
+                let source_offset = temp_x_offset + temp_bar_width * 0.5 * temp_spacing;
+                let source_z = temp_z;
+                
+                let flying_offset = source_offset + (target_offset - source_offset) * eased_t;
+                let flying_z = source_z + (target_z - source_z) * eased_t;
+                
+                // Arc motion
+                let arc_height = 0.3 * (1.0 - (2.0 * t - 1.0).powi(2));
+                
+                // Keep height consistent - same as source/target
+                let h = animation.source_height.clamp(0.0, 1.0);
+                
+                instances.push(Instance {
+                    offset: flying_offset,
+                    height: h + arc_height,
+                    z: flying_z,
+                    state: 4, // Cyan for flying
+                });
+            }
+        }
 
         let required_bytes = instances.len() as u64 * mem::size_of::<Instance>() as u64;
         if required_bytes > self.instance_buffer.size() {
@@ -1138,6 +1339,47 @@ impl<'a> Renderer<'a> {
             pass.set_bind_group(0, &self.tonemap_bind, &[]);
             pass.set_vertex_buffer(0, self.fullscreen_buffer.slice(..));
             pass.draw(0..6, 0..1);
+        }
+
+        // Egui render
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: window.scale_factor() as f32,
+        };
+
+        let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+        
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("EguiPass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &swap_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_descriptor);
+        }
+        
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

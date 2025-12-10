@@ -8,9 +8,9 @@ authors = ["alexFrankfurt"]
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1.0"
 bytemuck = { version = "1.14", features = ["derive"] }
-egui = "0.26"
-egui-wgpu = "0.26"
-egui-winit = "0.26"
+egui = "0.28"
+egui-wgpu = "0.28"
+egui-winit = "0.28"
 pollster = "0.3"
 winit = "0.29"
 wgpu = "0.20"
