@@ -6,7 +6,7 @@ use winit::{dpi::PhysicalSize, window::Window, event::WindowEvent};
 
 use glam::{Mat4, Vec3};
 
-use crate::engine::{Bar, AnimationInfo, TempArrayState};
+use crate::engine::{Bar, AnimationInfo, TempArrayState, SortMode, MultiTempArrayState, BarState};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -981,14 +981,16 @@ impl<'a> Renderer<'a> {
         });
     }
 
-    pub fn render(&mut self, bars: &[Bar], max_value: u32, comparisons: usize, operations: usize, time_elapsed: std::time::Duration, current_memory: usize, peak_memory: usize, animation: AnimationInfo, temp_array: &TempArrayState, dt: std::time::Duration, window: &Window) -> Result<()> {
+    pub fn render(&mut self, bars: &[Bar], max_value: u32, comparisons: usize, operations: usize, time_elapsed: std::time::Duration, current_memory: usize, peak_memory: usize, animation: AnimationInfo, temp_array: &TempArrayState, multi_temp_arrays: &MultiTempArrayState, mode: SortMode, merge_level: usize, dt: std::time::Duration, window: &Window) -> Result<Option<SortMode>> {
         if bars.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let array_size = bars.len();
         let base_memory = array_size * 4; // 4 bytes per u32 element
         let dt_secs = dt.as_secs_f32();
+        
+        let mut mode_changed: Option<SortMode> = None;
 
         // Initialize or resize animated heights/offsets if needed
         if self.animated_heights.len() != bars.len() {
@@ -1023,6 +1025,19 @@ impl<'a> Renderer<'a> {
                 .show(ctx, |ui| {
                     ui.heading("Merge Sort");
                     ui.separator();
+                    
+                    // Mode toggle
+                    ui.horizontal(|ui| {
+                        ui.label("Mode:");
+                        if ui.radio(matches!(mode, SortMode::Sequential), "Sequential").clicked() {
+                            mode_changed = Some(SortMode::Sequential);
+                        }
+                        if ui.radio(matches!(mode, SortMode::Parallel), "Parallel (8 threads)").clicked() {
+                            mode_changed = Some(SortMode::Parallel);
+                        }
+                    });
+                    ui.separator();
+                    
                     ui.label(format!("Time Elapsed: {:.2} s", time_elapsed.as_secs_f32()));
                     ui.label(format!("Comparisons: {}", comparisons));
                     ui.label(format!("Operations: {}", operations));
@@ -1036,6 +1051,23 @@ impl<'a> Renderer<'a> {
                     ui.label("Complexity Analysis:");
                     ui.label("Time: O(n log n)");
                     ui.label("Space: O(n)");
+                    
+                    if matches!(mode, SortMode::Parallel) {
+                        ui.separator();
+                        ui.label("Thread Colors:");
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(255, 102, 102), "T0");
+                            ui.colored_label(egui::Color32::from_rgb(255, 178, 102), "T1");
+                            ui.colored_label(egui::Color32::from_rgb(255, 255, 102), "T2");
+                            ui.colored_label(egui::Color32::from_rgb(102, 255, 102), "T3");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(102, 255, 255), "T4");
+                            ui.colored_label(egui::Color32::from_rgb(102, 178, 255), "T5");
+                            ui.colored_label(egui::Color32::from_rgb(178, 102, 255), "T6");
+                            ui.colored_label(egui::Color32::from_rgb(255, 102, 255), "T7");
+                        });
+                    }
                 });
         });
 
@@ -1044,6 +1076,7 @@ impl<'a> Renderer<'a> {
         
         // Shift main array to the left to make room for temp array
         let main_array_offset = -1.2; // Shift everything left
+        let z_span = 0.6;
 
         let mut instances: Vec<Instance> = bars
             .iter()
@@ -1051,8 +1084,24 @@ impl<'a> Renderer<'a> {
             .map(|(i, bar)| {
                 let t = if count > 1.0 { i as f32 / (count - 1.0) } else { 0.5 };
                 let offset = main_array_offset + (-1.0 + bar_width * (i as f32 + 0.5));
-                let z_span = 0.6;
-                let z = (t - 0.5) * z_span;
+                
+                // In parallel mode, spread thread-active bars horizontally by thread
+                let z = match mode {
+                    SortMode::Sequential => (t - 0.5) * z_span,
+                    SortMode::Parallel => {
+                        let state = bar.state as u32;
+                        // States 6-13 are ThreadActive0-7, spread them by thread
+                        if state >= 6 && state <= 13 {
+                            let thread_id = state - 6;
+                            let thread_t = thread_id as f32 / 7.0;
+                            (thread_t - 0.5) * z_span
+                        } else {
+                            // Normal bars keep their index-based position
+                            (t - 0.5) * z_span
+                        }
+                    }
+                };
+                
                 // Use animated height for smooth transitions
                 let h = self.animated_heights[i].clamp(0.0, 1.0);
                 Instance {
@@ -1064,40 +1113,121 @@ impl<'a> Renderer<'a> {
             })
             .collect();
 
+        // In parallel mode, add underline bars to show thread ownership
+        if matches!(mode, SortMode::Parallel) {
+            let n = bars.len();
+            let base_chunk_size = (n + 7) / 8; // Initial segment size for 8 threads
+            
+            // Segment size doubles with each merge level
+            // Level 0: base_chunk_size (8 threads each with 1 chunk)
+            // Level 1: base_chunk_size * 2 (4 threads each with 2 chunks merged)
+            // Level 2: base_chunk_size * 4 (2 threads each with 4 chunks merged)
+            // Level 3: base_chunk_size * 8 (1 thread with all chunks merged)
+            let segment_size = base_chunk_size * (1 << merge_level); // 2^merge_level
+            let num_segments = (n + segment_size - 1) / segment_size; // Ceiling division
+            
+            for i in 0..n {
+                // Calculate which segment this element belongs to
+                let segment_id = i / segment_size;
+                // Map segment to thread color (wrap around if fewer segments than threads)
+                let thread_id = segment_id.min(7);
+                
+                let t = if count > 1.0 { i as f32 / (count - 1.0) } else { 0.5 };
+                let offset = main_array_offset + (-1.0 + bar_width * (i as f32 + 0.5));
+                // Move underline in front of bars (higher Z = closer to camera)
+                let z = (t - 0.5) * z_span + 0.15;
+                
+                // Thin underline bar with saturated thread color (states 22-29)
+                instances.push(Instance {
+                    offset,
+                    height: 0.03, // Slightly thicker for visibility
+                    z,
+                    state: 22 + thread_id as u32, // Saturated underline color
+                });
+            }
+        }
+
         // Add temp array visualization (bars to the right, same height as main)
         // Position temp array on the right side with gap from main array
-        let temp_x_offset = main_array_offset + 1.2; // To the right of shifted main array
-        let temp_z = 0.0; // Same depth plane for visibility
+        let temp_x_offset = main_array_offset + 1.8; // To the right of shifted main array
         let temp_bar_width = bar_width * 0.6; // Smaller width bars for temp
         let temp_spacing = 1.8; // Extra spacing multiplier to prevent overlap
-        for (i, &val) in temp_array.values.iter().enumerate() {
-            let h = (val as f32 / max_val).clamp(0.0, 1.0);
-            // Position temp bars horizontally on the right side with more spacing
-            let temp_offset = temp_x_offset + temp_bar_width * (i as f32 + 0.5) * temp_spacing;
-            instances.push(Instance {
-                offset: temp_offset,
-                height: h, // Same height scale as main array
-                z: temp_z,
-                state: 5, // Purple/violet for temp array
-            });
+        
+        match mode {
+            SortMode::Sequential => {
+                // Single temp array in center
+                let temp_z = 0.0;
+                for (i, &val) in temp_array.values.iter().enumerate() {
+                    let h = (val as f32 / max_val).clamp(0.0, 1.0);
+                    let temp_offset = temp_x_offset + temp_bar_width * (i as f32 + 0.5) * temp_spacing;
+                    instances.push(Instance {
+                        offset: temp_offset,
+                        height: h,
+                        z: temp_z,
+                        state: 5, // Purple/violet for temp array
+                    });
+                }
+            }
+            SortMode::Parallel => {
+                // 8 temp arrays spread horizontally (different Z positions with X offset)
+                // Arrange in a 2x4 grid or spread along Z with slight X shifts
+                for (thread_id, thread_temp) in multi_temp_arrays.arrays.iter().enumerate() {
+                    // Spread threads along Z axis (horizontal from camera view)
+                    let thread_t = thread_id as f32 / 7.0; // 0 to 1 for 8 threads
+                    let temp_z = (thread_t - 0.5) * z_span * 6.0; // Wide spread in Z (3x more)
+                    
+                    // Also offset X per thread to create staggered layout
+                    let thread_x_offset = (thread_id as f32 - 3.5) * 0.25; // X offset per thread (3x more)
+                    
+                    for (i, &val) in thread_temp.values.iter().enumerate() {
+                        let h = (val as f32 / max_val).clamp(0.0, 1.0);
+                        let temp_offset = temp_x_offset + thread_x_offset + temp_bar_width * (i as f32 + 0.5) * temp_spacing;
+                        // Use thread-specific temp color (states 14-21)
+                        let state = 14 + thread_id as u32;
+                        instances.push(Instance {
+                            offset: temp_offset,
+                            height: h,
+                            z: temp_z,
+                            state,
+                        });
+                    }
+                }
+            }
         }
 
         // Add flying bar if animation is active
         if animation.active {
             let t = self.flying_bar_progress;
             let eased_t = t * t * (3.0 - 2.0 * t); // Smoothstep
+            let z_span = 0.6;
+            
+            // Determine temp array Z position based on mode and thread
+            let (temp_z, thread_x_offset) = match mode {
+                SortMode::Sequential => (0.0, 0.0),
+                SortMode::Parallel => {
+                    let thread_t = animation.thread_id as f32 / 7.0;
+                    let z = (thread_t - 0.5) * z_span * 6.0; // Wide spread matching temp arrays (3x more)
+                    let x_off = (animation.thread_id as f32 - 3.5) * 0.25; // Match temp array X offset (3x more)
+                    (z, x_off)
+                }
+            };
+            
+            // Get the appropriate temp array for this thread
+            let active_temp = match mode {
+                SortMode::Sequential => temp_array,
+                SortMode::Parallel => &multi_temp_arrays.arrays[animation.thread_id],
+            };
             
             if animation.is_temp_push {
                 // Flying from main array to temp array (on the right)
                 let source_offset = main_array_offset + (-1.0 + bar_width * (animation.source_idx as f32 + 0.5));
                 let source_t = if count > 1.0 { animation.source_idx as f32 / (count - 1.0) } else { 0.5 };
-                let z_span = 0.6;
                 let source_z = (source_t - 0.5) * z_span;
                 
-                // Target is in temp array (right side)
-                let temp_count = temp_array.values.len();
+                // Target is in temp array (right side) with thread-specific offset
+                let temp_count = active_temp.values.len();
                 let target_temp_idx = if temp_count > 0 { temp_count - 1 } else { 0 };
-                let target_offset = temp_x_offset + temp_bar_width * (target_temp_idx as f32 + 0.5) * temp_spacing;
+                let target_offset = temp_x_offset + thread_x_offset + temp_bar_width * (target_temp_idx as f32 + 0.5) * temp_spacing;
                 let target_z = temp_z;
                 
                 let flying_offset = source_offset + (target_offset - source_offset) * eased_t;
@@ -1109,21 +1239,26 @@ impl<'a> Renderer<'a> {
                 // Keep height consistent - same as source/target
                 let h = animation.source_height.clamp(0.0, 1.0);
                 
+                // Use thread-specific color in parallel mode
+                let state = match mode {
+                    SortMode::Sequential => 4, // Cyan for flying
+                    SortMode::Parallel => 6 + animation.thread_id as u32, // Thread color
+                };
+                
                 instances.push(Instance {
                     offset: flying_offset,
                     height: h + arc_height,
                     z: flying_z,
-                    state: 4, // Cyan for flying
+                    state,
                 });
             } else if animation.target_idx < bars.len() {
                 // Flying from temp array (right side) to main array
                 let target_offset = main_array_offset + (-1.0 + bar_width * (animation.target_idx as f32 + 0.5));
                 let target_t = if count > 1.0 { animation.target_idx as f32 / (count - 1.0) } else { 0.5 };
-                let z_span = 0.6;
                 let target_z = (target_t - 0.5) * z_span;
                 
-                // Source is front of temp array (index 0, on the right)
-                let source_offset = temp_x_offset + temp_bar_width * 0.5 * temp_spacing;
+                // Source is front of temp array (index 0, on the right) with thread offset
+                let source_offset = temp_x_offset + thread_x_offset + temp_bar_width * 0.5 * temp_spacing;
                 let source_z = temp_z;
                 
                 let flying_offset = source_offset + (target_offset - source_offset) * eased_t;
@@ -1135,11 +1270,17 @@ impl<'a> Renderer<'a> {
                 // Keep height consistent - same as source/target
                 let h = animation.source_height.clamp(0.0, 1.0);
                 
+                // Use thread-specific color in parallel mode
+                let state = match mode {
+                    SortMode::Sequential => 4, // Cyan for flying
+                    SortMode::Parallel => 6 + animation.thread_id as u32, // Thread color
+                };
+                
                 instances.push(Instance {
                     offset: flying_offset,
                     height: h + arc_height,
                     z: flying_z,
-                    state: 4, // Cyan for flying
+                    state,
                 });
             }
         }
@@ -1261,14 +1402,14 @@ impl<'a> Renderer<'a> {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost) => {
                 self.resize(self.size);
-                return Ok(());
+                return Ok(None);
             }
             Err(wgpu::SurfaceError::OutOfMemory) => {
                 return Err(anyhow::anyhow!("Surface out of memory"));
             }
             Err(err) => {
                 eprintln!("Surface error: {err:?}");
-                return Ok(());
+                return Ok(None);
             }
         };
         let swap_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1384,7 +1525,7 @@ impl<'a> Renderer<'a> {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        Ok(())
+        Ok(mode_changed)
     }
 }
 

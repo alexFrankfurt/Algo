@@ -41,6 +41,54 @@ fn select_state_color(state: u32) -> vec4<f32> {
         case 4u: { return vec4<f32>(0.35, 0.95, 0.90, 0.70); }
         // temp array - purple/violet
         case 5u: { return vec4<f32>(0.75, 0.50, 1.00, 0.65); }
+        // Thread 0 - Red
+        case 6u: { return vec4<f32>(1.00, 0.40, 0.40, 0.70); }
+        // Thread 1 - Orange  
+        case 7u: { return vec4<f32>(1.00, 0.65, 0.30, 0.70); }
+        // Thread 2 - Yellow
+        case 8u: { return vec4<f32>(1.00, 0.95, 0.35, 0.70); }
+        // Thread 3 - Green
+        case 9u: { return vec4<f32>(0.40, 1.00, 0.50, 0.70); }
+        // Thread 4 - Cyan
+        case 10u: { return vec4<f32>(0.35, 0.95, 0.95, 0.70); }
+        // Thread 5 - Blue
+        case 11u: { return vec4<f32>(0.40, 0.55, 1.00, 0.70); }
+        // Thread 6 - Purple
+        case 12u: { return vec4<f32>(0.75, 0.45, 1.00, 0.70); }
+        // Thread 7 - Magenta/Pink
+        case 13u: { return vec4<f32>(1.00, 0.45, 0.85, 0.70); }
+        // Thread 0 temp array - Darker Red
+        case 14u: { return vec4<f32>(0.80, 0.30, 0.30, 0.65); }
+        // Thread 1 temp array - Darker Orange
+        case 15u: { return vec4<f32>(0.85, 0.50, 0.20, 0.65); }
+        // Thread 2 temp array - Darker Yellow
+        case 16u: { return vec4<f32>(0.85, 0.80, 0.25, 0.65); }
+        // Thread 3 temp array - Darker Green
+        case 17u: { return vec4<f32>(0.30, 0.80, 0.40, 0.65); }
+        // Thread 4 temp array - Darker Cyan
+        case 18u: { return vec4<f32>(0.25, 0.75, 0.75, 0.65); }
+        // Thread 5 temp array - Darker Blue
+        case 19u: { return vec4<f32>(0.30, 0.45, 0.85, 0.65); }
+        // Thread 6 temp array - Darker Purple
+        case 20u: { return vec4<f32>(0.60, 0.35, 0.85, 0.65); }
+        // Thread 7 temp array - Darker Magenta
+        case 21u: { return vec4<f32>(0.85, 0.35, 0.70, 0.65); }
+        // Thread 0 underline - Bright Red
+        case 22u: { return vec4<f32>(1.00, 0.15, 0.15, 0.95); }
+        // Thread 1 underline - Bright Orange
+        case 23u: { return vec4<f32>(1.00, 0.55, 0.00, 0.95); }
+        // Thread 2 underline - Bright Yellow
+        case 24u: { return vec4<f32>(1.00, 0.95, 0.00, 0.95); }
+        // Thread 3 underline - Bright Green
+        case 25u: { return vec4<f32>(0.15, 1.00, 0.30, 0.95); }
+        // Thread 4 underline - Bright Cyan
+        case 26u: { return vec4<f32>(0.00, 1.00, 1.00, 0.95); }
+        // Thread 5 underline - Bright Blue
+        case 27u: { return vec4<f32>(0.20, 0.45, 1.00, 0.95); }
+        // Thread 6 underline - Bright Purple
+        case 28u: { return vec4<f32>(0.75, 0.20, 1.00, 0.95); }
+        // Thread 7 underline - Bright Magenta
+        case 29u: { return vec4<f32>(1.00, 0.20, 0.80, 0.95); }
         default: { return vec4<f32>(0.70, 0.70, 0.90, 0.50); }
     }
 }

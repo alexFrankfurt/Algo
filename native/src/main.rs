@@ -3,7 +3,7 @@ mod engine;
 mod algorithms;
 
 use anyhow::Result;
-use engine::Engine;
+use engine::{Engine, SortMode};
 use renderer::Renderer;
 use winit::{
     dpi::PhysicalSize,
@@ -63,9 +63,17 @@ async fn run() -> Result<()> {
                         engine.step(dt);
                     }
                     let (bars, max_val) = engine.bars();
-                    if let Err(err) = renderer.render(bars, max_val, engine.comparisons, engine.operations, engine.time_elapsed, engine.current_memory, engine.peak_memory, engine.current_animation.clone(), &engine.temp_array, dt, window) {
-                        eprintln!("Render error: {err:?}");
-                        target.exit();
+                    let mode = engine.mode;
+                    let merge_level = engine.merge_level;
+                    match renderer.render(bars, max_val, engine.comparisons, engine.operations, engine.time_elapsed, engine.current_memory, engine.peak_memory, engine.current_animation.clone(), &engine.temp_array, &engine.multi_temp_arrays, mode, merge_level, dt, window) {
+                        Ok(Some(new_mode)) => {
+                            engine.set_mode(new_mode);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            eprintln!("Render error: {err:?}");
+                            target.exit();
+                        }
                     }
                 }
                 _ => {}
