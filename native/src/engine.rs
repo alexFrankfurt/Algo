@@ -116,6 +116,11 @@ impl MultiTempArrayState {
             arr.values.clear();
         }
     }
+    
+    /// Calculate total memory usage across all temp arrays (in bytes)
+    pub fn total_memory(&self) -> usize {
+        self.arrays.iter().map(|arr| arr.values.len() * 4).sum()
+    }
 }
 
 pub struct Engine {
@@ -275,8 +280,14 @@ impl Engine {
             let action = self.actions[self.cursor];
             let thread_id = action.thread_id;
             
-            // Update current memory usage from action
-            self.current_memory = action.memory;
+            // Update current memory usage
+            // In parallel mode, compute from actual temp arrays; in sequential mode, use action.memory
+            if self.mode == SortMode::Parallel {
+                self.current_memory = self.multi_temp_arrays.total_memory();
+            } else {
+                self.current_memory = action.memory;
+            }
+            
             match action.kind {
                 ActionKind::Compare => {
                     self.comparisons += 1;
@@ -318,6 +329,11 @@ impl Engine {
                     if self.mode == SortMode::Parallel {
                         if let Some(arr) = self.multi_temp_arrays.arrays.get_mut(thread_id) {
                             arr.values.push(action.value);
+                        }
+                        // Update current and peak memory from actual temp arrays
+                        self.current_memory = self.multi_temp_arrays.total_memory();
+                        if self.current_memory > self.peak_memory {
+                            self.peak_memory = self.current_memory;
                         }
                     } else {
                         self.temp_array.values.push(action.value);
