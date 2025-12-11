@@ -23,20 +23,60 @@ The native version is a high-fidelity 3D visualizer built with Rust. It leverage
    cargo run --release
    ```
 
-### Controls
-- **Space**: Pause/Resume visualization.
-- **R**: Reset the sorting array.
-
-### Implemented Algorithms
-- Bubble Sort
 
 ## Video demonstration
 
 [watch](https://www.youtube.com/watch?v=vQolPP4WW6A)
 
-## Web Visualization
+# Algo
 
-The project also includes a web-based visualizer located in the root directory, utilizing HTML, CSS, and JavaScript for accessible, browser-based demonstrations.
+Algo is a collection of visualizers for sorting algorithms — a lightweight web demo plus two native Rust renderers that showcase GPU-based rendering and shader-driven effects.
 
-### Running the Web Version
-Open `index.html` in a modern web browser.
+**Repository highlights**
+- Web UI: simple browser demo (`index.html`, `public/`, `src/main.js`).
+- Native Rust visualizer: `native/` (Rust + `wgpu`) with 3D rendering, post-processing, and sorting algorithm implementations.
+- Vulkan-style visualizer: `vulcan_viz/` (separate Rust example with dedicated shaders under `shaders/` and `shader.wgsl`).
+
+Project structure (important folders)
+- `index.html` / `public/` — Web front-end and static assets.
+- `src/` — JavaScript UI and logic for the web demo.
+- `native/` — Rust native app using `wgpu`.
+   - `native/src/main.rs` — application entry.
+   - `native/src/engine.rs`, `native/src/renderer.rs` — core render pipeline and scene logic.
+   - `native/src/bar.wgsl`, `native/src/floor.wgsl`, `native/src/post.wgsl` — WGSL shaders used by the native visualizer.
+   - `native/src/algorithms/` — sorting algorithm implementations (e.g. `bubble.rs`, `merge.rs`, `mod.rs`).
+- `vulcan_viz/` — an alternate Rust renderer and shader examples.
+   - `vulcan_viz/src/main.rs` — entrypoint for the vulcan visualizer.
+   - `vulcan_viz/shaders/` — GLSL shaders used by the example renderer.
+
+Implemented algorithms
+- Bubble Sort (`native/src/algorithms/bubble.rs`)
+- Merge Sort (`native/src/algorithms/merge.rs`)
+
+Build & run
+
+- Web demo (quick): open `index.html` in a modern browser, or serve `public/` with a static server:
+   ```powershell
+   # from repository root
+   python -m http.server 8000 --directory public
+   # then open http://localhost:8000
+   ```
+
+- Native visualizer (`native/`): requires Rust toolchain. From repository root:
+   ```powershell
+   cd native
+   cargo run --release
+   ```
+
+- Vulkan example (`vulcan_viz/`): also a Rust project — build/run similarly:
+   ```powershell
+   cd vulcan_viz
+   cargo run --release
+   ```
+
+Notes
+- Shaders: native uses WGSL files in `native/src/` (bar, floor, post). `vulcan_viz/` contains GLSL shader examples.
+- Adding algorithms: new algorithm modules go in `native/src/algorithms/` and should be wired into the engine via `mod.rs`.
+- Assets: `native/assets/` holds runtime assets used by the native app.
+
+If you'd like, I can add quick HOWTO sections for adding a new algorithm module or for configuring the renderer (e.g., toggling bloom/HDR). 
