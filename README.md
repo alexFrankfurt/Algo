@@ -30,6 +30,10 @@ The native version is a high-fidelity 3D visualizer built with Rust. It leverage
 ### Implemented Algorithms
 - Bubble Sort
 
+## Video demonstration
+
+[watch](https://www.youtube.com/watch?v=vQolPP4WW6A)
+
 ## Web Visualization
 
 The project also includes a web-based visualizer located in the root directory, utilizing HTML, CSS, and JavaScript for accessible, browser-based demonstrations.
