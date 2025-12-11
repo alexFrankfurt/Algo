@@ -981,7 +981,7 @@ impl<'a> Renderer<'a> {
         });
     }
 
-    pub fn render(&mut self, bars: &[Bar], max_value: u32, comparisons: usize, operations: usize, time_elapsed: std::time::Duration, current_memory: usize, peak_memory: usize, animation: AnimationInfo, temp_array: &TempArrayState, multi_temp_arrays: &MultiTempArrayState, mode: SortMode, merge_level: usize, dt: std::time::Duration, window: &Window) -> Result<Option<SortMode>> {
+    pub fn render(&mut self, bars: &[Bar], max_value: u32, comparisons: usize, operations: usize, memory_ops: usize, time_elapsed: std::time::Duration, current_memory: usize, peak_memory: usize, animation: AnimationInfo, temp_array: &TempArrayState, multi_temp_arrays: &MultiTempArrayState, mode: SortMode, merge_level: usize, est_time_ns: u64, est_comparison_ns: u64, est_memory_ns: u64, memory_allocs: usize, memory_deallocs: usize, dt: std::time::Duration, window: &Window) -> Result<Option<SortMode>> {
         if bars.is_empty() {
             return Ok(None);
         }
@@ -1039,8 +1039,54 @@ impl<'a> Renderer<'a> {
                     ui.separator();
                     
                     ui.label(format!("Time Elapsed: {:.2} s", time_elapsed.as_secs_f32()));
-                    ui.label(format!("Comparisons: {}", comparisons));
-                    ui.label(format!("Operations: {}", operations));
+                    ui.separator();
+                    
+                    // Estimated CPU Time section with operation counts
+                    ui.label("Estimated CPU Time:");
+                    let format_time = |ns: u64| -> String {
+                        if ns >= 1_000_000 {
+                            format!("{:.2}ms", ns as f64 / 1_000_000.0)
+                        } else if ns >= 1_000 {
+                            format!("{:.2}µs", ns as f64 / 1_000.0)
+                        } else {
+                            format!("{}ns", ns)
+                        }
+                    };
+                    
+                    // Cost constants (must match engine.rs)
+                    const COMPARE_NS: u64 = 3;
+                    const MEMORY_READ_NS: u64 = 5;
+                    const MEMORY_WRITE_NS: u64 = 5;
+                    const ALLOC_NS: u64 = 200;
+                    const FREE_NS: u64 = 100;
+                    
+                    // Comparisons: count × (2 reads + 1 compare) = 13ns each
+                    let compare_cost = 2 * MEMORY_READ_NS + COMPARE_NS;
+                    ui.label(format!("  Comparisons: {} × {}ns = {}", 
+                        comparisons, compare_cost, format_time(comparisons as u64 * compare_cost)));
+                    
+                    // Memory ops: count × (1 read + 1 write) = 10ns each
+                    let memory_op_cost = MEMORY_READ_NS + MEMORY_WRITE_NS;
+                    ui.label(format!("  Memory ops: {} × {}ns = {}", 
+                        memory_ops, memory_op_cost, format_time(memory_ops as u64 * memory_op_cost)));
+                    
+                    // Allocations: count × 200ns each
+                    ui.label(format!("  Allocations: {} × {}ns = {}", 
+                        memory_allocs, ALLOC_NS, format_time(memory_allocs as u64 * ALLOC_NS)));
+                    
+                    // Deallocations: count × 100ns each
+                    ui.label(format!("  Deallocations: {} × {}ns = {}", 
+                        memory_deallocs, FREE_NS, format_time(memory_deallocs as u64 * FREE_NS)));
+                    
+                    // Total
+                    ui.label(format!("  Total: {}", format_time(est_time_ns)));
+                    
+                    if matches!(mode, SortMode::Parallel) {
+                        // Show theoretical parallel speedup
+                        let parallel_time_ns = est_time_ns / 8; // Ideal 8-thread speedup
+                        ui.label(format!("  Parallel (ideal): {}", format_time(parallel_time_ns)));
+                    }
+                    
                     ui.separator();
                     ui.label("Memory Usage:");
                     ui.label(format!("Array: {} elements × 4 bytes = {} bytes", array_size, base_memory));

@@ -131,6 +131,7 @@ pub struct Engine {
     max_value: u32,
     pub comparisons: usize,
     pub operations: usize, // Swaps or Writes
+    pub memory_ops: usize,    // Total memory operations (TempPush, Write, Swap)
     pub current_memory: usize,
     pub peak_memory: usize,
     pub time_elapsed: Duration,
@@ -143,6 +144,12 @@ pub struct Engine {
     pub num_threads: usize,
     initial_values: Vec<u32>,  // Store initial values for mode switching
     pub merge_level: usize,    // Current merge phase level (segment size = chunk * 2^merge_level)
+    // Estimated CPU time tracking (in nanoseconds)
+    pub est_time_ns: u64,           // Total estimated time in nanoseconds
+    pub est_comparison_ns: u64,     // Time spent on comparisons
+    pub est_memory_ns: u64,         // Time spent on memory operations
+    pub memory_allocs: usize,       // Number of memory allocations
+    pub memory_deallocs: usize,     // Number of memory deallocations (TempClear)
 }
 
 impl Engine {
@@ -171,6 +178,7 @@ impl Engine {
             max_value,
             comparisons: 0,
             operations: 0,
+            memory_ops: 0,
             current_memory: 0,
             peak_memory,
             time_elapsed: Duration::ZERO,
@@ -183,6 +191,11 @@ impl Engine {
             num_threads,
             initial_values: values,
             merge_level: 0,
+            est_time_ns: 0,
+            est_comparison_ns: 0,
+            est_memory_ns: 0,
+            memory_allocs: 0,
+            memory_deallocs: 0,
         }
     }
 
@@ -197,6 +210,7 @@ impl Engine {
         self.cursor = 0;
         self.comparisons = 0;
         self.operations = 0;
+        self.memory_ops = 0;
         self.current_memory = 0;
         self.time_elapsed = Duration::ZERO;
         self.step_timer = 0.0;
@@ -204,6 +218,11 @@ impl Engine {
         self.temp_array = TempArrayState::default();
         self.multi_temp_arrays = MultiTempArrayState::new(self.num_threads);
         self.merge_level = 0;
+        self.est_time_ns = 0;
+        self.est_comparison_ns = 0;
+        self.est_memory_ns = 0;
+        self.memory_allocs = 0;
+        self.memory_deallocs = 0;
         
         // Restore bars to initial values
         for (bar, &val) in self.bars.iter_mut().zip(self.initial_values.iter()) {
@@ -234,12 +253,19 @@ impl Engine {
         self.cursor = 0;
         self.comparisons = 0;
         self.operations = 0;
+        self.memory_ops = 0;
         self.current_memory = 0;
         self.time_elapsed = Duration::ZERO;
         self.step_timer = 0.0;
         self.current_animation = AnimationInfo::default();
         self.temp_array = TempArrayState::default();
         self.multi_temp_arrays = MultiTempArrayState::new(self.num_threads);
+        self.merge_level = 0;
+        self.est_time_ns = 0;
+        self.est_comparison_ns = 0;
+        self.est_memory_ns = 0;
+        self.memory_allocs = 0;
+        self.memory_deallocs = 0;
         
         for (bar, val) in self.bars.iter_mut().zip(values.into_iter()) {
             bar.value = val;
@@ -288,9 +314,22 @@ impl Engine {
                 self.current_memory = action.memory;
             }
             
+            // Estimated CPU time costs (in nanoseconds)
+            // Based on typical modern CPU performance
+            const COMPARE_NS: u64 = 3;       // Simple integer comparison
+            const MEMORY_READ_NS: u64 = 5;   // L1 cache hit
+            const MEMORY_WRITE_NS: u64 = 5;  // L1 cache hit
+            const ALLOC_NS: u64 = 200;       // Small allocation (malloc overhead)
+            const FREE_NS: u64 = 100;        // Deallocation
+            
             match action.kind {
                 ActionKind::Compare => {
                     self.comparisons += 1;
+                    // Cost: 2 memory reads + 1 comparison
+                    let cost = 2 * MEMORY_READ_NS + COMPARE_NS;
+                    self.est_comparison_ns += cost;
+                    self.est_time_ns += cost;
+                    
                     self.current_animation.active = false;
                     let state = if self.mode == SortMode::Parallel {
                         BarState::from_thread_id(thread_id)
@@ -302,6 +341,12 @@ impl Engine {
                 }
                 ActionKind::Swap => {
                     self.operations += 1;
+                    self.memory_ops += 1;
+                    // Cost: 2 reads + 2 writes
+                    let cost = 2 * MEMORY_READ_NS + 2 * MEMORY_WRITE_NS;
+                    self.est_memory_ns += cost;
+                    self.est_time_ns += cost;
+                    
                     self.current_animation.active = false;
                     self.bars.swap(action.i, action.j);
                     let state = if self.mode == SortMode::Parallel {
@@ -313,6 +358,25 @@ impl Engine {
                     self.mark(action.j, state);
                 }
                 ActionKind::TempPush => {
+                    self.memory_ops += 1;
+                    // Cost: 1 read from main array + 1 write to temp array
+                    // First push in a merge also includes allocation cost
+                    let is_first_push = if self.mode == SortMode::Parallel {
+                        self.multi_temp_arrays.arrays.get(thread_id).map_or(true, |a| a.values.is_empty())
+                    } else {
+                        self.temp_array.values.is_empty()
+                    };
+                    
+                    let alloc_cost = if is_first_push { 
+                        self.memory_allocs += 1;
+                        ALLOC_NS 
+                    } else { 
+                        0 
+                    };
+                    let cost = MEMORY_READ_NS + MEMORY_WRITE_NS + alloc_cost;
+                    self.est_memory_ns += cost;
+                    self.est_time_ns += cost;
+                    
                     // Element is being added to temp array
                     let source_height = action.value as f32 / self.max_value as f32;
                     self.current_animation = AnimationInfo {
@@ -349,6 +413,12 @@ impl Engine {
                 }
                 ActionKind::Write => {
                     self.operations += 1;
+                    self.memory_ops += 1;
+                    // Cost: 1 read from temp + 1 write to main array
+                    let cost = MEMORY_READ_NS + MEMORY_WRITE_NS;
+                    self.est_memory_ns += cost;
+                    self.est_time_ns += cost;
+                    
                     let source_height = action.value as f32 / self.max_value as f32;
                     self.current_animation = AnimationInfo {
                         active: true,
@@ -382,6 +452,12 @@ impl Engine {
                     }
                 }
                 ActionKind::TempClear => {
+                    self.memory_deallocs += 1;
+                    // Cost: deallocation of temp array
+                    let cost = FREE_NS;
+                    self.est_memory_ns += cost;
+                    self.est_time_ns += cost;
+                    
                     // Merge complete, clear temp array for this thread
                     self.current_animation.active = false;
                     if self.mode == SortMode::Parallel {

@@ -20,7 +20,7 @@ fn main() -> Result<()> {
 async fn run() -> Result<()> {
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
-        .with_title("Algo Native - wgpu")
+        .with_title("Algorithm Native - wgpu")
         .with_inner_size(PhysicalSize::new(1280, 720))
         .build(&event_loop)?;
 
@@ -65,7 +65,17 @@ async fn run() -> Result<()> {
                     let (bars, max_val) = engine.bars();
                     let mode = engine.mode;
                     let merge_level = engine.merge_level;
-                    match renderer.render(bars, max_val, engine.comparisons, engine.operations, engine.time_elapsed, engine.current_memory, engine.peak_memory, engine.current_animation.clone(), &engine.temp_array, &engine.multi_temp_arrays, mode, merge_level, dt, window) {
+                    match renderer.render(
+                        bars, max_val, 
+                        engine.comparisons, engine.operations, engine.memory_ops,
+                        engine.time_elapsed, engine.current_memory, engine.peak_memory, 
+                        engine.current_animation.clone(), 
+                        &engine.temp_array, &engine.multi_temp_arrays, 
+                        mode, merge_level,
+                        engine.est_time_ns, engine.est_comparison_ns, engine.est_memory_ns, 
+                        engine.memory_allocs, engine.memory_deallocs,
+                        dt, window
+                    ) {
                         Ok(Some(new_mode)) => {
                             engine.set_mode(new_mode);
                         }
