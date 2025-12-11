@@ -1,0 +1,13 @@
+[package]
+name = "vulcan-viz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = { version = "0.29", features = ["rwh_05"] }
+ash = "0.37"
+ash-window = "0.12"
+raw-window-handle = "0.5"
+shaderc = { version = "0.10.1", features = ["build-from-source"] }
+glam = "0.30.9"
+
