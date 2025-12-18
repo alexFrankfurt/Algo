@@ -71,24 +71,89 @@ void main()
         absorbColor = vec3(0.05, 0.05, 0.08);
         ior = 1.5; 
         isOpaque = true;
+    } else if (gl_InstanceCustomIndexEXT == 100) {
+        // Arrow marker for i pointer - BRIGHT GREEN, solid opaque
+        float pulse = 0.9 + 0.1 * sin(pushC.time * 6.0);
+        absorbColor = vec3(0.0, 1.0, 0.2) * pulse;
+        emission = 2.0; // Very bright
+        isOpaque = true;
+    } else if (gl_InstanceCustomIndexEXT == 101) {
+        // Arrow marker for j pointer - BRIGHT CYAN, solid opaque
+        float pulse = 0.9 + 0.1 * sin(pushC.time * 6.0);
+        absorbColor = vec3(0.0, 0.8, 1.0) * pulse;
+        emission = 2.0; // Very bright
+        isOpaque = true;
+    } else if (gl_InstanceCustomIndexEXT == 102) {
+        // Arrow marker for pivot - BRIGHT GOLD, solid opaque
+        float pulse = 0.85 + 0.15 * sin(pushC.time * 4.0);
+        absorbColor = vec3(1.0, 0.8, 0.0) * pulse;
+        emission = 2.5; // Extra bright for pivot
+        isOpaque = true;
     } else {
-        // Bars: Glassy with Cyan/Pink gradient
-        float t = float(gl_InstanceCustomIndexEXT) / 12.0; // Normalized value
+        // Decode value and visual state from custom index
+        uint encoded_data = gl_InstanceCustomIndexEXT;
+        uint bar_value = encoded_data & 0xFFFF; // Lower 16 bits
+        uint visual_state = (encoded_data >> 16) & 0xFFFF; // Upper 16 bits
         
-        // Palette: Cyan -> Purple -> Pink
+        // Bars: Glassy with Cyan/Pink gradient based on value
+        float t = float(bar_value) / 12.0; // Normalized value
+        
+        // Base palette: Cyan -> Purple -> Pink
         vec3 cyan = vec3(0.0, 0.9, 1.0);
         vec3 purple = vec3(0.6, 0.0, 1.0);
         vec3 pink = vec3(1.0, 0.2, 0.6);
         
-        vec3 color;
+        vec3 base_color;
         if (t < 0.5) {
-            color = mix(cyan, purple, t * 2.0);
+            base_color = mix(cyan, purple, t * 2.0);
         } else {
-            color = mix(purple, pink, (t - 0.5) * 2.0);
+            base_color = mix(purple, pink, (t - 0.5) * 2.0);
         }
         
-        absorbColor = color;
-        emission = 0.1; // Subtle glow
+        // Apply visual state effects
+        if (visual_state == 1u) { // Pivot
+            // Bright gold/yellow for pivot with strong pulsing
+            float pulse = 0.7 + 0.3 * sin(pushC.time * 8.0);
+            absorbColor = vec3(1.0, 0.8, 0.0) * pulse;
+            emission = 0.8 + 0.4 * pulse; // Strong glow
+        } else if (visual_state == 2u) { // Comparing
+            // Bright white/blue for elements being compared
+            float pulse = 0.8 + 0.2 * sin(pushC.time * 12.0);
+            absorbColor = mix(base_color, vec3(1.0, 1.0, 1.0), 0.6) * pulse;
+            emission = 0.4 + 0.2 * pulse;
+        } else if (visual_state == 3u) { // Swapped
+            // Bright red/orange for recently swapped elements
+            float pulse = 0.9 + 0.1 * sin(pushC.time * 15.0);
+            absorbColor = vec3(1.0, 0.3, 0.1) * pulse;
+            emission = 0.6 + 0.3 * pulse; // Strong red glow
+        } else if (visual_state == 4u) { // ActiveRange
+            // Slightly brighter version of base color for active range
+            absorbColor = base_color * 1.2;
+            emission = 0.15; // Slightly more glow
+        } else if (visual_state == 5u) { // Swapping
+            // Bright magenta/purple for elements currently being swapped
+            float pulse = 0.8 + 0.2 * sin(pushC.time * 20.0);
+            absorbColor = vec3(1.0, 0.0, 1.0) * pulse; // Bright magenta
+            emission = 1.0 + 0.5 * pulse; // Very strong glow during swap
+        } else if (visual_state == 6u) { // IPointer - Partition boundary
+            // Bright green for the partition boundary pointer (i)
+            float pulse = 0.85 + 0.15 * sin(pushC.time * 10.0);
+            absorbColor = vec3(0.0, 1.0, 0.3) * pulse; // Bright green
+            emission = 0.7 + 0.3 * pulse; // Strong green glow
+        } else if (visual_state == 7u) { // JPointer - Scanning pointer
+            // Bright cyan for the scanning pointer (j)
+            float pulse = 0.85 + 0.15 * sin(pushC.time * 10.0);
+            absorbColor = vec3(0.0, 0.8, 1.0) * pulse; // Bright cyan
+            emission = 0.7 + 0.3 * pulse; // Strong cyan glow
+        } else if (visual_state == 8u) { // BothPointers - When i==j
+            // Bright yellow-green when both pointers at same position
+            float pulse = 0.85 + 0.15 * sin(pushC.time * 10.0);
+            absorbColor = vec3(0.5, 1.0, 0.0) * pulse; // Yellow-green
+            emission = 0.8 + 0.4 * pulse; // Very strong glow
+        } else { // Normal
+            absorbColor = base_color;
+            emission = 0.1; // Subtle glow
+        }
     }
     // ----------------------
 
