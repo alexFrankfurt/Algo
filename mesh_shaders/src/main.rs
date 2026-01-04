@@ -677,85 +677,59 @@ impl VulkanApp {
         })
     }
 
-    /// Convert equirectangular image to 6 cubemap faces
-    fn convert_equirectangular_to_cubemap(src: &image::RgbaImage) -> Vec<Vec<u8>> {
+    /// Convert cubemap cross layout image to 6 cubemap faces
+    /// Cross layout (4:3 aspect ratio):
+    ///       [+Y]          (col 1, row 0)
+    /// [-X] [+Z] [+X] [-Z] (cols 0-3, row 1)
+    ///       [-Y]          (col 1, row 2)
+    fn convert_cross_to_cubemap(src: &image::RgbaImage) -> (Vec<Vec<u8>>, u32) {
         let (src_width, src_height) = src.dimensions();
-        let face_size = src_width / 4;
+        
+        // Face size based on 4x3 grid
+        let face_w = src_width / 4;
+        let face_h = src_height / 3;
+        let face_size = face_w.min(face_h);
         
         let mut faces: Vec<Vec<u8>> = vec![vec![0u8; (face_size * face_size * 4) as usize]; 6];
         
-        const PI: f32 = std::f32::consts::PI;
+        // Face positions in the cross layout (col, row) and whether to flip
+        // Vulkan face order: +X, -X, +Y, -Y, +Z, -Z
+        let face_configs: [(u32, u32, bool, bool); 6] = [
+            (2, 1, false, false),  // +X (right) - col 2, row 1
+            (0, 1, false, false),  // -X (left) - col 0, row 1
+            (1, 0, false, false),  // +Y (top) - col 1, row 0
+            (1, 2, false, false),  // -Y (bottom) - col 1, row 2
+            (1, 1, false, false),  // +Z (front) - col 1, row 1
+            (3, 1, false, false),  // -Z (back) - col 3, row 1
+        ];
         
-        // Face indices: +X, -X, +Y, -Y, +Z, -Z
-        for face in 0..6 {
+        for (face_idx, (col, row, flip_x, flip_y)) in face_configs.iter().enumerate() {
+            let src_x_offset = col * face_w;
+            let src_y_offset = row * face_h;
+            
             for y in 0..face_size {
                 for x in 0..face_size {
-                    // Normalize coordinates to -1..1
-                    let a = 2.0 * (x as f32) / (face_size as f32) - 1.0;
-                    let b = 2.0 * (y as f32) / (face_size as f32) - 1.0;
+                    let sample_x = if *flip_x { face_size - 1 - x } else { x };
+                    let sample_y = if *flip_y { face_size - 1 - y } else { y };
                     
-                    // Convert face coordinates to 3D direction (physics coordinate system)
-                    let dir = match face {
-                        0 => glam::Vec3::new(1.0, -a, -b),      // +X
-                        1 => glam::Vec3::new(-1.0, a, -b),      // -X
-                        2 => glam::Vec3::new(a, 1.0, b),        // +Y (up)
-                        3 => glam::Vec3::new(a, -1.0, -b),      // -Y (down)
-                        4 => glam::Vec3::new(a, -b, 1.0),       // +Z
-                        5 => glam::Vec3::new(-a, -b, -1.0),     // -Z
-                        _ => unreachable!(),
-                    };
+                    let src_x = (src_x_offset + sample_x).min(src_width - 1);
+                    let src_y = (src_y_offset + sample_y).min(src_height - 1);
                     
-                    // Convert to spherical coordinates
-                    let r = (dir.x * dir.x + dir.y * dir.y).sqrt();
-                    let phi = dir.y.atan2(dir.x);
-                    let theta = dir.z.atan2(r);
-                    
-                    // Convert to UV coordinates
-                    let u = (phi + PI) / (2.0 * PI);
-                    let v = (PI / 2.0 - theta) / PI;
-                    
-                    // Sample from source image with bilinear interpolation
-                    let src_x = u * (src_width as f32);
-                    let src_y = v * (src_height as f32);
-                    
-                    let x0 = (src_x.floor() as u32).min(src_width - 1);
-                    let y0 = (src_y.floor() as u32).min(src_height - 1);
-                    let x1 = (x0 + 1).min(src_width - 1);
-                    let y1 = (y0 + 1).min(src_height - 1);
-                    
-                    let fx = src_x - src_x.floor();
-                    let fy = src_y - src_y.floor();
-                    
-                    let p00 = src.get_pixel(x0, y0);
-                    let p10 = src.get_pixel(x1, y0);
-                    let p01 = src.get_pixel(x0, y1);
-                    let p11 = src.get_pixel(x1, y1);
-                    
-                    // Bilinear interpolation
-                    let mut color = [0u8; 4];
-                    for c in 0..4 {
-                        let v00 = p00[c] as f32;
-                        let v10 = p10[c] as f32;
-                        let v01 = p01[c] as f32;
-                        let v11 = p11[c] as f32;
-                        
-                        let value = v00 * (1.0 - fx) * (1.0 - fy)
-                                  + v10 * fx * (1.0 - fy)
-                                  + v01 * (1.0 - fx) * fy
-                                  + v11 * fx * fy;
-                        color[c] = value.clamp(0.0, 255.0) as u8;
-                    }
+                    let pixel = src.get_pixel(src_x, src_y);
                     
                     let idx = ((y * face_size + x) * 4) as usize;
-                    faces[face][idx..idx + 4].copy_from_slice(&color);
+                    faces[face_idx][idx] = pixel[0];
+                    faces[face_idx][idx + 1] = pixel[1];
+                    faces[face_idx][idx + 2] = pixel[2];
+                    faces[face_idx][idx + 3] = pixel[3];
                 }
             }
         }
         
-        faces
+        (faces, face_size)
     }
 
-    /// Load equirectangular image and convert to Vulkan cubemap texture
+    /// Load cubemap cross layout image and convert to Vulkan cubemap texture
     unsafe fn load_cubemap(
         device: &Device,
         allocator: &Arc<Mutex<Allocator>>,
@@ -764,11 +738,9 @@ impl VulkanApp {
         path: &str,
     ) -> Result<Texture, Box<dyn std::error::Error>> {
         let img = image::open(path)?.to_rgba8();
-        let (width, _height) = img.dimensions();
-        let face_size = width / 4;
         
-        // Convert equirectangular to 6 cubemap faces
-        let faces = Self::convert_equirectangular_to_cubemap(&img);
+        // Convert cross layout to 6 cubemap faces
+        let (faces, face_size) = Self::convert_cross_to_cubemap(&img);
         
         let format = vk::Format::R8G8B8A8_SRGB;
         
@@ -1178,9 +1150,14 @@ impl VulkanApp {
             camera_angle.cos() * camera_radius,
         );
         
-        // Look target adjusted by pitch (W/S or Up/Down arrows)
-        let look_height = pitch * 3.0;  // Scale pitch to reasonable look distance
-        let look_target = Vec3::new(0.0, look_height, 0.0);
+        // Look direction based on pitch (W/S or Up/Down arrows)
+        // Camera looks toward origin, pitch rotates view up/down
+        let look_dir = Vec3::new(
+            -camera_pos.x,
+            pitch.sin() * camera_radius,
+            -camera_pos.z,
+        ).normalize();
+        let look_target = camera_pos + look_dir;
         let view = Mat4::look_at_rh(camera_pos, look_target, Vec3::Y);
         
         // Model rotation for the cubes (independent of camera)
@@ -1349,7 +1326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Camera pitch angle (vertical look direction)
     let mut pitch: f32 = 0.0;
     let pitch_speed: f32 = 0.05;
-    let max_pitch: f32 = 1.2;  // ~70 degrees
+    let max_pitch: f32 = std::f32::consts::FRAC_PI_2 - 0.01;  // ~90 degrees (full up/down)
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
