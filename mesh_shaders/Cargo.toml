@@ -12,3 +12,6 @@ glam = "0.25"
 bytemuck = { version = "1.14", features = ["derive"] }
 image = "0.24"
 gpu-allocator = { version = "0.27", features = ["vulkan"] }
+
+[profile.dev]
+opt-level = 1

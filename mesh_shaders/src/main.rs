@@ -1,11 +1,12 @@
-//! Mesh Shader Demo with Textures
+//! Mesh Shader Demo with Hardware Ray Traced Shadows
 //!
-//! Demonstrates mesh shaders with PBR textures (albedo, normal, roughness/metallic/AO)
+//! Demonstrates mesh shaders with ray-traced shadows using VK_KHR_ray_query
 
 use ash::{vk, Device, Entry, Instance};
 use ash::ext::mesh_shader;
+use ash::khr::acceleration_structure;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc, Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
 use std::ffi::CStr;
@@ -26,8 +27,17 @@ const HEIGHT: u32 = 720;
 struct PushConstants {
     mvp: [[f32; 4]; 4],
     inv_view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
+    light_pos: [f32; 4],
     time: f32,
     _padding: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    pos: [f32; 3],
+    _pad: f32,
 }
 
 struct Texture {
@@ -36,12 +46,20 @@ struct Texture {
     allocation: Option<Allocation>,
 }
 
+struct AccelerationStructure {
+    handle: vk::AccelerationStructureKHR,
+    buffer: vk::Buffer,
+    allocation: Option<Allocation>,
+    device_address: vk::DeviceAddress,
+}
+
 struct VulkanApp {
     _entry: Entry,
     instance: Instance,
     device: Device,
     allocator: Arc<Mutex<Allocator>>,
     mesh_shader_ext: mesh_shader::Device,
+    accel_struct_ext: acceleration_structure::Device,
     graphics_queue: vk::Queue,
     #[allow(dead_code)]
     queue_family_index: u32,
@@ -73,7 +91,15 @@ struct VulkanApp {
     albedo_texture: Texture,
     normal_texture: Texture,
     rma_texture: Texture,
+    // Ray tracing resources
+    blas: AccelerationStructure,
+    tlas: AccelerationStructure,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_allocation: Option<Allocation>,
+    index_buffer: vk::Buffer,
+    index_buffer_allocation: Option<Allocation>,
 }
+
 
 impl VulkanApp {
     unsafe fn new(window: &winit::window::Window) -> Result<Self, Box<dyn std::error::Error>> {
@@ -81,7 +107,7 @@ impl VulkanApp {
 
         // Create instance
         let app_info = vk::ApplicationInfo::default()
-            .application_name(CStr::from_bytes_with_nul(b"Mesh Shader Demo\0")?)
+            .application_name(CStr::from_bytes_with_nul(b"Mesh Shader RT Demo\0")?)
             .application_version(vk::make_api_version(0, 1, 0, 0))
             .engine_name(CStr::from_bytes_with_nul(b"No Engine\0")?)
             .engine_version(vk::make_api_version(0, 1, 0, 0))
@@ -109,12 +135,12 @@ impl VulkanApp {
             None,
         )?;
 
-        // Pick physical device
+        // Pick physical device with mesh shader AND ray tracing support
         let physical_devices = instance.enumerate_physical_devices()?;
         let physical_device = physical_devices
             .into_iter()
-            .find(|&pd| Self::check_mesh_shader_support(&instance, pd))
-            .ok_or("No GPU with mesh shader support found")?;
+            .find(|&pd| Self::check_device_support(&instance, pd))
+            .ok_or("No GPU with mesh shader and ray tracing support found")?;
 
         // Find queue family
         let queue_families = instance.get_physical_device_queue_family_properties(physical_device);
@@ -130,7 +156,7 @@ impl VulkanApp {
             .map(|(i, _)| i as u32)
             .ok_or("No suitable queue family")?;
 
-        // Create device
+        // Create device with ray tracing extensions
         let queue_priorities = [1.0f32];
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -139,11 +165,20 @@ impl VulkanApp {
         let device_extensions = [
             ash::khr::swapchain::NAME.as_ptr(),
             mesh_shader::NAME.as_ptr(),
+            acceleration_structure::NAME.as_ptr(),
+            ash::khr::ray_query::NAME.as_ptr(),
+            ash::khr::deferred_host_operations::NAME.as_ptr(),
         ];
 
         let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
             .mesh_shader(true)
             .task_shader(true);
+
+        let mut accel_struct_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
+
+        let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default()
+            .ray_query(true);
 
         let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
@@ -155,11 +190,14 @@ impl VulkanApp {
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
             .enabled_extension_names(&device_extensions)
             .push_next(&mut mesh_shader_features)
+            .push_next(&mut accel_struct_features)
+            .push_next(&mut ray_query_features)
             .push_next(&mut features_12)
             .push_next(&mut features_13);
 
         let device = instance.create_device(physical_device, &device_create_info, None)?;
         let mesh_shader_ext = mesh_shader::Device::new(&instance, &device);
+        let accel_struct_ext = acceleration_structure::Device::new(&instance, &device);
         let graphics_queue = device.get_device_queue(queue_family_index, 0);
 
         // Create allocator
@@ -298,7 +336,7 @@ impl VulkanApp {
             command_pool,
             graphics_queue,
             "assets/floor_albedo.png",
-            true, // sRGB
+            true,
         )?;
         let normal_texture = Self::load_texture(
             &device,
@@ -317,7 +355,6 @@ impl VulkanApp {
             false,
         )?;
 
-        // Load cubemap for background (convert equirectangular to proper cubemap)
         let cubemap_texture = Self::load_cubemap(
             &device,
             &allocator,
@@ -326,7 +363,12 @@ impl VulkanApp {
             "assets/cubemap.png",
         )?;
 
-        // Create descriptor set layout for main pipeline
+        // Create acceleration structures for ray tracing
+        let (blas, tlas, vertex_buffer, vertex_buffer_allocation, index_buffer, index_buffer_allocation) = 
+            Self::create_acceleration_structures(&device, &allocator, &accel_struct_ext, command_pool, graphics_queue)?;
+
+
+        // Create descriptor set layout for main pipeline (textures + TLAS)
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -343,15 +385,25 @@ impl VulkanApp {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let descriptor_set_layout = device.create_descriptor_set_layout(&layout_info, None)?;
 
-        // Create descriptor pool (4 samplers: 3 for main + 1 for background)
-        let pool_sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(4)];
+        // Create descriptor pool
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(4),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1),
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
             .pool_sizes(&pool_sizes);
@@ -380,7 +432,7 @@ impl VulkanApp {
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
         ];
 
-        let writes: Vec<_> = image_infos
+        let mut writes: Vec<_> = image_infos
             .iter()
             .enumerate()
             .map(|(i, info)| {
@@ -391,6 +443,20 @@ impl VulkanApp {
                     .image_info(std::slice::from_ref(info))
             })
             .collect();
+
+        // Add TLAS descriptor
+        let accel_structs = [tlas.handle];
+        let mut accel_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&accel_structs);
+        
+        let accel_write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(3)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1)
+            .push_next(&mut accel_write_info);
+        writes.push(accel_write);
+
         device.update_descriptor_sets(&writes, &[]);
 
         // Create pipeline layout
@@ -407,7 +473,6 @@ impl VulkanApp {
         let pipeline = Self::create_mesh_pipeline(&device, render_pass, pipeline_layout, extent)?;
 
         // === BACKGROUND PIPELINE SETUP ===
-        // Background descriptor set layout (single cubemap sampler)
         let bg_bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -418,14 +483,12 @@ impl VulkanApp {
         let bg_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bg_bindings);
         let bg_descriptor_set_layout = device.create_descriptor_set_layout(&bg_layout_info, None)?;
 
-        // Allocate background descriptor set
         let bg_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(std::slice::from_ref(&bg_descriptor_set_layout));
         let bg_descriptor_sets = device.allocate_descriptor_sets(&bg_alloc_info)?;
         let bg_descriptor_set = bg_descriptor_sets[0];
 
-        // Update background descriptor set with cubemap
         let bg_image_info = vk::DescriptorImageInfo::default()
             .sampler(sampler)
             .image_view(cubemap_texture.view)
@@ -437,7 +500,6 @@ impl VulkanApp {
             .image_info(std::slice::from_ref(&bg_image_info));
         device.update_descriptor_sets(&[bg_write], &[]);
 
-        // Background pipeline layout
         let bg_push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .size(std::mem::size_of::<PushConstants>() as u32);
@@ -446,7 +508,6 @@ impl VulkanApp {
             .push_constant_ranges(std::slice::from_ref(&bg_push_constant_range));
         let bg_pipeline_layout = device.create_pipeline_layout(&bg_pipeline_layout_info, None)?;
 
-        // Create background pipeline
         let bg_pipeline = Self::create_background_pipeline(&device, render_pass, bg_pipeline_layout, extent)?;
 
         // Allocate command buffers
@@ -469,6 +530,7 @@ impl VulkanApp {
             device,
             allocator,
             mesh_shader_ext,
+            accel_struct_ext,
             graphics_queue,
             queue_family_index,
             surface_loader,
@@ -498,8 +560,478 @@ impl VulkanApp {
             albedo_texture,
             normal_texture,
             rma_texture,
+            blas,
+            tlas,
+            vertex_buffer,
+            vertex_buffer_allocation,
+            index_buffer,
+            index_buffer_allocation,
         })
     }
+
+
+    unsafe fn check_device_support(instance: &Instance, device: vk::PhysicalDevice) -> bool {
+        // Check mesh shader support
+        let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+        let mut accel_struct_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+        let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut mesh_shader_features)
+            .push_next(&mut accel_struct_features)
+            .push_next(&mut ray_query_features);
+        instance.get_physical_device_features2(device, &mut features2);
+        
+        mesh_shader_features.mesh_shader == vk::TRUE 
+            && accel_struct_features.acceleration_structure == vk::TRUE
+            && ray_query_features.ray_query == vk::TRUE
+    }
+
+    /// Create acceleration structures for the cubes
+    unsafe fn create_acceleration_structures(
+        device: &Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        accel_ext: &acceleration_structure::Device,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<(AccelerationStructure, AccelerationStructure, vk::Buffer, Option<Allocation>, vk::Buffer, Option<Allocation>), Box<dyn std::error::Error>> {
+        // Create geometry for 8 cubes in a ring (matching mesh shader)
+        let num_cubes = 8u32;
+        let mut all_vertices: Vec<Vertex> = Vec::new();
+        let mut all_indices: Vec<u32> = Vec::new();
+        
+        for cube_idx in 0..num_cubes {
+            let angle = cube_idx as f32 * std::f32::consts::TAU / num_cubes as f32;
+            let radius = 2.0f32;
+            let offset = Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
+            let size = 0.35f32;
+            
+            let base_vertex = all_vertices.len() as u32;
+            
+            // 8 vertices per cube
+            let positions = [
+                Vec3::new(-size, -size, -size),
+                Vec3::new( size, -size, -size),
+                Vec3::new( size,  size, -size),
+                Vec3::new(-size,  size, -size),
+                Vec3::new(-size, -size,  size),
+                Vec3::new( size, -size,  size),
+                Vec3::new( size,  size,  size),
+                Vec3::new(-size,  size,  size),
+            ];
+            
+            for pos in &positions {
+                let world_pos = *pos + offset;
+                all_vertices.push(Vertex { pos: world_pos.to_array(), _pad: 0.0 });
+            }
+            
+            // 12 triangles (36 indices) per cube
+            let cube_indices: [u32; 36] = [
+                0, 2, 1, 0, 3, 2,  // Front
+                4, 5, 6, 4, 6, 7,  // Back
+                0, 4, 7, 0, 7, 3,  // Left
+                1, 2, 6, 1, 6, 5,  // Right
+                3, 7, 6, 3, 6, 2,  // Top
+                0, 1, 5, 0, 5, 4,  // Bottom
+            ];
+            
+            for idx in &cube_indices {
+                all_indices.push(base_vertex + idx);
+            }
+        }
+
+        // Create vertex buffer
+        let vertex_buffer_size = (all_vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
+        let vertex_buffer_info = vk::BufferCreateInfo::default()
+            .size(vertex_buffer_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR 
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let vertex_buffer = device.create_buffer(&vertex_buffer_info, None)?;
+        let vertex_req = device.get_buffer_memory_requirements(vertex_buffer);
+        
+        let vertex_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "vertex_buffer",
+            requirements: vertex_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(vertex_buffer, vertex_allocation.memory(), vertex_allocation.offset())?;
+
+        // Create index buffer
+        let index_buffer_size = (all_indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
+        let index_buffer_info = vk::BufferCreateInfo::default()
+            .size(index_buffer_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR 
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let index_buffer = device.create_buffer(&index_buffer_info, None)?;
+        let index_req = device.get_buffer_memory_requirements(index_buffer);
+        
+        let index_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "index_buffer",
+            requirements: index_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(index_buffer, index_allocation.memory(), index_allocation.offset())?;
+
+        // Upload vertex and index data via staging buffer
+        let staging_size = vertex_buffer_size + index_buffer_size;
+        let staging_info = vk::BufferCreateInfo::default()
+            .size(staging_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let staging_buffer = device.create_buffer(&staging_info, None)?;
+        let staging_req = device.get_buffer_memory_requirements(staging_buffer);
+        
+        let staging_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "staging",
+            requirements: staging_req,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(staging_buffer, staging_allocation.memory(), staging_allocation.offset())?;
+
+        // Copy data to staging
+        let mapped = staging_allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+        std::ptr::copy_nonoverlapping(
+            all_vertices.as_ptr() as *const u8,
+            mapped,
+            vertex_buffer_size as usize,
+        );
+        std::ptr::copy_nonoverlapping(
+            all_indices.as_ptr() as *const u8,
+            mapped.add(vertex_buffer_size as usize),
+            index_buffer_size as usize,
+        );
+
+        // Transfer to GPU
+        let cmd_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = device.allocate_command_buffers(&cmd_info)?[0];
+        device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
+
+        let vertex_copy = vk::BufferCopy::default().size(vertex_buffer_size);
+        device.cmd_copy_buffer(cmd, staging_buffer, vertex_buffer, &[vertex_copy]);
+
+        let index_copy = vk::BufferCopy::default()
+            .src_offset(vertex_buffer_size)
+            .size(index_buffer_size);
+        device.cmd_copy_buffer(cmd, staging_buffer, index_buffer, &[index_copy]);
+
+        // Memory barrier before AS build
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+
+        device.end_command_buffer(cmd)?;
+        let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
+        device.queue_wait_idle(queue)?;
+        device.free_command_buffers(command_pool, &[cmd]);
+
+        // Clean up staging
+        device.destroy_buffer(staging_buffer, None);
+        allocator.lock().unwrap().free(staging_allocation)?;
+
+        // Get buffer device addresses
+        let vertex_address = device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer));
+        let index_address = device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(index_buffer));
+
+        // Build BLAS
+        let geometry = vk::AccelerationStructureGeometryKHR::default()
+            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+            .flags(vk::GeometryFlagsKHR::OPAQUE)
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                    .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                    .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: vertex_address })
+                    .vertex_stride(std::mem::size_of::<Vertex>() as vk::DeviceSize)
+                    .max_vertex(all_vertices.len() as u32 - 1)
+                    .index_type(vk::IndexType::UINT32)
+                    .index_data(vk::DeviceOrHostAddressConstKHR { device_address: index_address }),
+            });
+
+        let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .geometries(std::slice::from_ref(&geometry));
+
+        let primitive_count = (all_indices.len() / 3) as u32;
+        let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        accel_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &build_info,
+            &[primitive_count],
+            &mut size_info,
+        );
+
+        // Create BLAS buffer
+        let blas_buffer_info = vk::BufferCreateInfo::default()
+            .size(size_info.acceleration_structure_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let blas_buffer = device.create_buffer(&blas_buffer_info, None)?;
+        let blas_req = device.get_buffer_memory_requirements(blas_buffer);
+        
+        let blas_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "blas",
+            requirements: blas_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(blas_buffer, blas_allocation.memory(), blas_allocation.offset())?;
+
+        // Create BLAS
+        let blas_create_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .buffer(blas_buffer)
+            .size(size_info.acceleration_structure_size)
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
+        
+        let blas_handle = accel_ext.create_acceleration_structure(&blas_create_info, None)?;
+        let blas_address = accel_ext.get_acceleration_structure_device_address(
+            &vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(blas_handle)
+        );
+
+        // Create scratch buffer for BLAS build
+        let scratch_buffer_info = vk::BufferCreateInfo::default()
+            .size(size_info.build_scratch_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let scratch_buffer = device.create_buffer(&scratch_buffer_info, None)?;
+        let scratch_req = device.get_buffer_memory_requirements(scratch_buffer);
+        
+        let scratch_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "scratch",
+            requirements: scratch_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(scratch_buffer, scratch_allocation.memory(), scratch_allocation.offset())?;
+        let scratch_address = device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(scratch_buffer));
+
+        // Build BLAS
+        let cmd = device.allocate_command_buffers(&cmd_info)?[0];
+        device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
+
+        let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .dst_acceleration_structure(blas_handle)
+            .geometries(std::slice::from_ref(&geometry))
+            .scratch_data(vk::DeviceOrHostAddressKHR { device_address: scratch_address });
+
+        let build_range = vk::AccelerationStructureBuildRangeInfoKHR::default()
+            .primitive_count(primitive_count)
+            .primitive_offset(0)
+            .first_vertex(0);
+
+        accel_ext.cmd_build_acceleration_structures(cmd, &[build_info], &[&[build_range]]);
+
+        // Barrier between BLAS and TLAS build
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+            .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+
+        device.end_command_buffer(cmd)?;
+        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
+        device.queue_wait_idle(queue)?;
+        device.free_command_buffers(command_pool, &[cmd]);
+
+        // Clean up scratch buffer
+        device.destroy_buffer(scratch_buffer, None);
+        allocator.lock().unwrap().free(scratch_allocation)?;
+
+        // Build TLAS
+        let instance = vk::AccelerationStructureInstanceKHR {
+            transform: vk::TransformMatrixKHR { matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+            ]},
+            instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xFF),
+            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_address },
+        };
+
+        // Create instance buffer
+        let instance_buffer_size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() as vk::DeviceSize;
+        let instance_buffer_info = vk::BufferCreateInfo::default()
+            .size(instance_buffer_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR 
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let instance_buffer = device.create_buffer(&instance_buffer_info, None)?;
+        let instance_req = device.get_buffer_memory_requirements(instance_buffer);
+        
+        let instance_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "instance_buffer",
+            requirements: instance_req,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(instance_buffer, instance_allocation.memory(), instance_allocation.offset())?;
+
+        // Copy instance data
+        let mapped = instance_allocation.mapped_ptr().unwrap().as_ptr() as *mut vk::AccelerationStructureInstanceKHR;
+        std::ptr::copy_nonoverlapping(&instance, mapped, 1);
+
+        let instance_address = device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(instance_buffer));
+
+        // TLAS geometry
+        let tlas_geometry = vk::AccelerationStructureGeometryKHR::default()
+            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+            .flags(vk::GeometryFlagsKHR::OPAQUE)
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
+                    .data(vk::DeviceOrHostAddressConstKHR { device_address: instance_address }),
+            });
+
+        let tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .geometries(std::slice::from_ref(&tlas_geometry));
+
+        let mut tlas_size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        accel_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &tlas_build_info,
+            &[1],
+            &mut tlas_size_info,
+        );
+
+        // Create TLAS buffer
+        let tlas_buffer_info = vk::BufferCreateInfo::default()
+            .size(tlas_size_info.acceleration_structure_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let tlas_buffer = device.create_buffer(&tlas_buffer_info, None)?;
+        let tlas_req = device.get_buffer_memory_requirements(tlas_buffer);
+        
+        let tlas_allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "tlas",
+            requirements: tlas_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(tlas_buffer, tlas_allocation.memory(), tlas_allocation.offset())?;
+
+        // Create TLAS
+        let tlas_create_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .buffer(tlas_buffer)
+            .size(tlas_size_info.acceleration_structure_size)
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
+        
+        let tlas_handle = accel_ext.create_acceleration_structure(&tlas_create_info, None)?;
+        let tlas_address = accel_ext.get_acceleration_structure_device_address(
+            &vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(tlas_handle)
+        );
+
+        // Create scratch buffer for TLAS build
+        let tlas_scratch_info = vk::BufferCreateInfo::default()
+            .size(tlas_size_info.build_scratch_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let tlas_scratch = device.create_buffer(&tlas_scratch_info, None)?;
+        let tlas_scratch_req = device.get_buffer_memory_requirements(tlas_scratch);
+        
+        let tlas_scratch_alloc = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "tlas_scratch",
+            requirements: tlas_scratch_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        device.bind_buffer_memory(tlas_scratch, tlas_scratch_alloc.memory(), tlas_scratch_alloc.offset())?;
+        let tlas_scratch_address = device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(tlas_scratch));
+
+        // Build TLAS
+        let cmd = device.allocate_command_buffers(&cmd_info)?[0];
+        device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
+
+        let tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .dst_acceleration_structure(tlas_handle)
+            .geometries(std::slice::from_ref(&tlas_geometry))
+            .scratch_data(vk::DeviceOrHostAddressKHR { device_address: tlas_scratch_address });
+
+        let tlas_build_range = vk::AccelerationStructureBuildRangeInfoKHR::default()
+            .primitive_count(1)
+            .primitive_offset(0)
+            .first_vertex(0);
+
+        accel_ext.cmd_build_acceleration_structures(cmd, &[tlas_build_info], &[&[tlas_build_range]]);
+
+        device.end_command_buffer(cmd)?;
+        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
+        device.queue_wait_idle(queue)?;
+        device.free_command_buffers(command_pool, &[cmd]);
+
+        // Clean up
+        device.destroy_buffer(tlas_scratch, None);
+        allocator.lock().unwrap().free(tlas_scratch_alloc)?;
+        device.destroy_buffer(instance_buffer, None);
+        allocator.lock().unwrap().free(instance_allocation)?;
+
+        let blas = AccelerationStructure {
+            handle: blas_handle,
+            buffer: blas_buffer,
+            allocation: Some(blas_allocation),
+            device_address: blas_address,
+        };
+
+        let tlas = AccelerationStructure {
+            handle: tlas_handle,
+            buffer: tlas_buffer,
+            allocation: Some(tlas_allocation),
+            device_address: tlas_address,
+        };
+
+        Ok((blas, tlas, vertex_buffer, Some(vertex_allocation), index_buffer, Some(index_allocation)))
+    }
+
 
     unsafe fn load_texture(
         device: &Device,
@@ -519,7 +1051,6 @@ impl VulkanApp {
             vk::Format::R8G8B8A8_UNORM
         };
 
-        // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -545,7 +1076,6 @@ impl VulkanApp {
 
         device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
 
-        // Create staging buffer
         let buffer_size = (width * height * 4) as vk::DeviceSize;
         let buffer_info = vk::BufferCreateInfo::default()
             .size(buffer_size)
@@ -565,11 +1095,9 @@ impl VulkanApp {
 
         device.bind_buffer_memory(staging_buffer, staging_alloc.memory(), staging_alloc.offset())?;
 
-        // Copy pixels to staging
         let mapped = staging_alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
         std::ptr::copy_nonoverlapping(pixels.as_ptr(), mapped, pixels.len());
 
-        // Transfer to GPU
         let cmd_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -578,7 +1106,6 @@ impl VulkanApp {
 
         device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
 
-        // Transition to transfer dst
         let barrier = vk::ImageMemoryBarrier::default()
             .image(image)
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -603,7 +1130,6 @@ impl VulkanApp {
             &[barrier],
         );
 
-        // Copy buffer to image
         let region = vk::BufferImageCopy::default()
             .image_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -621,7 +1147,6 @@ impl VulkanApp {
             &[region],
         );
 
-        // Transition to shader read
         let barrier = vk::ImageMemoryBarrier::default()
             .image(image)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -656,7 +1181,6 @@ impl VulkanApp {
         device.destroy_buffer(staging_buffer, None);
         allocator.lock().unwrap().free(staging_alloc)?;
 
-        // Create image view
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -677,30 +1201,21 @@ impl VulkanApp {
         })
     }
 
-    /// Convert cubemap cross layout image to 6 cubemap faces
-    /// Cross layout (4:3 aspect ratio):
-    ///       [+Y]          (col 1, row 0)
-    /// [-X] [+Z] [+X] [-Z] (cols 0-3, row 1)
-    ///       [-Y]          (col 1, row 2)
     fn convert_cross_to_cubemap(src: &image::RgbaImage) -> (Vec<Vec<u8>>, u32) {
         let (src_width, src_height) = src.dimensions();
-        
-        // Face size based on 4x3 grid
         let face_w = src_width / 4;
         let face_h = src_height / 3;
         let face_size = face_w.min(face_h);
         
         let mut faces: Vec<Vec<u8>> = vec![vec![0u8; (face_size * face_size * 4) as usize]; 6];
         
-        // Face positions in the cross layout (col, row) and whether to flip
-        // Vulkan face order: +X, -X, +Y, -Y, +Z, -Z
         let face_configs: [(u32, u32, bool, bool); 6] = [
-            (2, 1, false, false),  // +X (right) - col 2, row 1
-            (0, 1, false, false),  // -X (left) - col 0, row 1
-            (1, 0, false, false),  // +Y (top) - col 1, row 0
-            (1, 2, false, false),  // -Y (bottom) - col 1, row 2
-            (1, 1, false, false),  // +Z (front) - col 1, row 1
-            (3, 1, false, false),  // -Z (back) - col 3, row 1
+            (2, 1, false, false),
+            (0, 1, false, false),
+            (1, 0, false, false),
+            (1, 2, false, false),
+            (1, 1, false, false),
+            (3, 1, false, false),
         ];
         
         for (face_idx, (col, row, flip_x, flip_y)) in face_configs.iter().enumerate() {
@@ -729,7 +1244,6 @@ impl VulkanApp {
         (faces, face_size)
     }
 
-    /// Load cubemap cross layout image and convert to Vulkan cubemap texture
     unsafe fn load_cubemap(
         device: &Device,
         allocator: &Arc<Mutex<Allocator>>,
@@ -738,13 +1252,10 @@ impl VulkanApp {
         path: &str,
     ) -> Result<Texture, Box<dyn std::error::Error>> {
         let img = image::open(path)?.to_rgba8();
-        
-        // Convert cross layout to 6 cubemap faces
         let (faces, face_size) = Self::convert_cross_to_cubemap(&img);
         
         let format = vk::Format::R8G8B8A8_SRGB;
         
-        // Create cubemap image with 6 array layers
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -771,7 +1282,6 @@ impl VulkanApp {
         
         device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
         
-        // Create staging buffer for all 6 faces
         let face_bytes = (face_size * face_size * 4) as vk::DeviceSize;
         let buffer_size = face_bytes * 6;
         let buffer_info = vk::BufferCreateInfo::default()
@@ -792,14 +1302,12 @@ impl VulkanApp {
         
         device.bind_buffer_memory(staging_buffer, staging_alloc.memory(), staging_alloc.offset())?;
         
-        // Copy all faces to staging buffer
         let mapped = staging_alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
         for (i, face_data) in faces.iter().enumerate() {
             let offset = i * face_data.len();
             std::ptr::copy_nonoverlapping(face_data.as_ptr(), mapped.add(offset), face_data.len());
         }
         
-        // Transfer to GPU
         let cmd_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -808,7 +1316,6 @@ impl VulkanApp {
         
         device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
         
-        // Transition all layers to transfer dst
         let barrier = vk::ImageMemoryBarrier::default()
             .image(image)
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -833,7 +1340,6 @@ impl VulkanApp {
             &[barrier],
         );
         
-        // Copy each face from staging buffer to image layer
         let mut regions = Vec::with_capacity(6);
         for face in 0..6u32 {
             regions.push(vk::BufferImageCopy::default()
@@ -855,7 +1361,6 @@ impl VulkanApp {
             &regions,
         );
         
-        // Transition to shader read
         let barrier = vk::ImageMemoryBarrier::default()
             .image(image)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -890,7 +1395,6 @@ impl VulkanApp {
         device.destroy_buffer(staging_buffer, None);
         allocator.lock().unwrap().free(staging_alloc)?;
         
-        // Create cubemap image view
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::CUBE)
@@ -911,13 +1415,6 @@ impl VulkanApp {
         })
     }
 
-    unsafe fn check_mesh_shader_support(instance: &Instance, device: vk::PhysicalDevice) -> bool {
-        let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
-        let mut features2 =
-            vk::PhysicalDeviceFeatures2::default().push_next(&mut mesh_shader_features);
-        instance.get_physical_device_features2(device, &mut features2);
-        mesh_shader_features.mesh_shader == vk::TRUE
-    }
 
     unsafe fn create_mesh_pipeline(
         device: &Device,
@@ -971,13 +1468,12 @@ impl VulkanApp {
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)  // Disable culling for glass
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        // Enable alpha blending for glass transparency
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(true)
@@ -1037,7 +1533,6 @@ impl VulkanApp {
                 .name(entry_point),
         ];
 
-        // No vertex input - fullscreen triangle generated in shader
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -1069,7 +1564,6 @@ impl VulkanApp {
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        // No blending for background - it's opaque
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(false);
@@ -1135,23 +1629,18 @@ impl VulkanApp {
 
         self.device.cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::INLINE);
 
-        // Calculate matrices
         let aspect = self.extent.width as f32 / self.extent.height as f32;
         let proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         
-        // Rotate the camera around the scene for the skybox effect
         let camera_angle = time * 0.3;
         let camera_radius = 5.0;
         
-        // Camera position orbits horizontally
         let camera_pos = Vec3::new(
             camera_angle.sin() * camera_radius,
             1.5,
             camera_angle.cos() * camera_radius,
         );
         
-        // Look direction based on pitch (W/S or Up/Down arrows)
-        // Camera looks toward origin, pitch rotates view up/down
         let look_dir = Vec3::new(
             -camera_pos.x,
             pitch.sin() * camera_radius,
@@ -1160,13 +1649,14 @@ impl VulkanApp {
         let look_target = camera_pos + look_dir;
         let view = Mat4::look_at_rh(camera_pos, look_target, Vec3::Y);
         
-        // Model rotation for the cubes (independent of camera)
         let model = Mat4::from_rotation_y(time * 0.5);
         let mvp = proj * view * model;
         
-        // For background: use view-projection without model transform
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
+
+        // Light position behind the camera
+        let light_pos = camera_pos + Vec3::new(0.0, 3.0, 0.0);
 
         // === DRAW BACKGROUND FIRST ===
         self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
@@ -1182,6 +1672,8 @@ impl VulkanApp {
         let bg_push_constants = PushConstants {
             mvp: mvp.to_cols_array_2d(),
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            camera_pos: Vec4::new(camera_pos.x, camera_pos.y, camera_pos.z, 1.0).to_array(),
+            light_pos: Vec4::new(light_pos.x, light_pos.y, light_pos.z, 1.0).to_array(),
             time,
             _padding: [0.0; 3],
         };
@@ -1194,10 +1686,9 @@ impl VulkanApp {
             bytemuck::bytes_of(&bg_push_constants),
         );
 
-        // Draw fullscreen triangle for background
         self.device.cmd_draw(cmd, 3, 1, 0, 0);
 
-        // === DRAW MESH SHADER BARS ===
+        // === DRAW MESH SHADER CUBES ===
         self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
         self.device.cmd_bind_descriptor_sets(
             cmd,
@@ -1211,6 +1702,8 @@ impl VulkanApp {
         let push_constants = PushConstants {
             mvp: mvp.to_cols_array_2d(),
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            camera_pos: Vec4::new(camera_pos.x, camera_pos.y, camera_pos.z, 1.0).to_array(),
+            light_pos: Vec4::new(light_pos.x, light_pos.y, light_pos.z, 1.0).to_array(),
             time,
             _padding: [0.0; 3],
         };
@@ -1250,6 +1743,7 @@ impl VulkanApp {
     }
 }
 
+
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
@@ -1274,10 +1768,32 @@ impl Drop for VulkanApp {
                 self.allocator.lock().unwrap().free(alloc).unwrap();
             }
 
-            // Destroy cubemap texture
             self.device.destroy_image_view(self.cubemap_texture.view, None);
             self.device.destroy_image(self.cubemap_texture.image, None);
             if let Some(alloc) = self.cubemap_texture.allocation.take() {
+                self.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+
+            // Destroy acceleration structures
+            self.accel_struct_ext.destroy_acceleration_structure(self.tlas.handle, None);
+            self.device.destroy_buffer(self.tlas.buffer, None);
+            if let Some(alloc) = self.tlas.allocation.take() {
+                self.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+
+            self.accel_struct_ext.destroy_acceleration_structure(self.blas.handle, None);
+            self.device.destroy_buffer(self.blas.buffer, None);
+            if let Some(alloc) = self.blas.allocation.take() {
+                self.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+
+            // Destroy vertex/index buffers
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            if let Some(alloc) = self.vertex_buffer_allocation.take() {
+                self.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+            self.device.destroy_buffer(self.index_buffer, None);
+            if let Some(alloc) = self.index_buffer_allocation.take() {
                 self.allocator.lock().unwrap().free(alloc).unwrap();
             }
 
@@ -1316,17 +1832,16 @@ impl Drop for VulkanApp {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
-        .with_title("Mesh Shader + Textures Demo")
+        .with_title("Mesh Shader + RT Shadows Demo")
         .with_inner_size(winit::dpi::LogicalSize::new(WIDTH, HEIGHT))
         .build(&event_loop)?;
 
     let mut app = unsafe { VulkanApp::new(&window)? };
     let start_time = std::time::Instant::now();
     
-    // Camera pitch angle (vertical look direction)
     let mut pitch: f32 = 0.0;
     let pitch_speed: f32 = 0.05;
-    let max_pitch: f32 = std::f32::consts::FRAC_PI_2 - 0.01;  // ~90 degrees (full up/down)
+    let max_pitch: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);

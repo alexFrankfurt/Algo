@@ -21,6 +21,9 @@ taskPayloadSharedEXT TaskPayload payload;
 
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
+    mat4 inv_view_proj;
+    vec4 camera_pos;
+    vec4 light_pos;
     float time;
 } pc;
 
@@ -53,11 +56,7 @@ void main() {
         vec3(-size,  size,  size)
     );
     
-    // We need 24 vertices for proper per-face normals and UVs
-    // 6 faces * 4 vertices each
-    
     // Face data: positions indices, normal, tangent, UVs
-    // Front face (Z-)
     int faceIndices[24] = int[24](
         0, 1, 2, 3,  // Front
         5, 4, 7, 6,  // Back
