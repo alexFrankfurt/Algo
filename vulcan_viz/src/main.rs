@@ -16,48 +16,388 @@ const NUM_BARS: usize = 12;
 
 struct SortSystem {
     values: Vec<u32>,
-    i: usize,
-    j: usize,
-    sorted: bool,
+    stack: Vec<(usize, usize)>, // Stack for quicksort ranges
+    current_low: usize,
+    current_high: usize,
+    i: usize, // Left pointer for partitioning
+    j: usize, // Right pointer for partitioning
+    pivot_value: u32,
+    state: SortState,
+    delay_counter: u32,
+    // Visual state tracking
+    pivot_index: Option<usize>,
+    comparing_indices: Vec<usize>,
+    swapped_indices: Vec<usize>,
+    active_range: Option<(usize, usize)>,
+    swap_cooldown: u32,
+    // Swap animation tracking
+    swap_animation: Option<SwapAnimation>,
+    swap_animation_progress: f32,
+    // Two-pointer visualization
+    i_pointer: Option<usize>, // Partition boundary pointer
+    j_pointer: Option<usize>, // Scanning pointer
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SortState {
+    PopingRange,
+    Partitioning,
+    AnimatingSwap,
+    PlacingPivot,
+    AnimatingPivotPlacement,
+    PushingRanges,
+    Finished,
+    Shuffling,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SwapAnimation {
+    index_a: usize,
+    index_b: usize,
+    value_a: u32,
+    value_b: u32,
+    is_pivot_swap: bool,
 }
 
 impl SortSystem {
     fn new(count: usize) -> Self {
         let mut values: Vec<u32> = (1..=count as u32).collect();
-        // Simple shuffle
-        for i in 0..count {
-            let r = (i * 1987 + 3) % count;
-            values.swap(i, r);
+        // Better shuffle using Fisher-Yates algorithm
+        for i in (1..count).rev() {
+            let j = (i * 7919 + 1987) % (i + 1); // Better random-like distribution
+            values.swap(i, j);
         }
-        Self { values, i: 0, j: 0, sorted: false }
+        // println!("Initial values after shuffle: {:?}", values);
+        let mut stack = Vec::new();
+        if count > 1 {
+            stack.push((0, count - 1));
+        }
+        Self { 
+            values, 
+            stack,
+            current_low: 0,
+            current_high: 0,
+            i: 0,
+            j: 0,
+            pivot_value: 0,
+            state: SortState::PopingRange,
+            delay_counter: 0,
+            // Visual state tracking
+            pivot_index: None,
+            comparing_indices: Vec::new(),
+            swapped_indices: Vec::new(),
+            active_range: None,
+            swap_cooldown: 0,
+            // Swap animation tracking
+            swap_animation: None,
+            swap_animation_progress: 0.0,
+            // Two-pointer visualization
+            i_pointer: None,
+            j_pointer: None,
+        }
     }
 
     fn step(&mut self) {
-        if self.sorted { return; }
-        let n = self.values.len();
-        if self.i < n {
-            if self.j < n - 1 - self.i {
-                if self.values[self.j] > self.values[self.j + 1] {
-                    self.values.swap(self.j, self.j + 1);
+        // Handle swap animations
+        if let Some(_) = self.swap_animation {
+            self.swap_animation_progress += 0.008; // Animation speed - much slower for crystal clear visibility
+            if self.swap_animation_progress >= 1.0 {
+                // Animation complete, perform the actual swap
+                if let Some(anim) = self.swap_animation {
+                    self.values.swap(anim.index_a, anim.index_b);
+                    
+                    // Set visual feedback
+                    self.swapped_indices.clear();
+                    self.swapped_indices.push(anim.index_a);
+                    self.swapped_indices.push(anim.index_b);
+                    
+                    if anim.is_pivot_swap {
+                        self.swap_cooldown = 120; // Much longer for pivot swaps (6.7 seconds at 60fps)
+                        self.state = SortState::PushingRanges;
+                    } else {
+                        self.swap_cooldown = 90; // Much longer regular swap duration (5 seconds at 60fps)
+                        self.state = SortState::Partitioning;
+                    }
                 }
-                self.j += 1;
-            } else {
-                self.j = 0;
-                self.i += 1;
+                
+                self.swap_animation = None;
+                self.swap_animation_progress = 0.0;
             }
-        } else {
-            self.sorted = true;
-            // Reset for infinite loop
-            self.i = 0;
-            self.j = 0;
-            self.sorted = false;
-            // Shuffle again?
-             for i in 0..n {
-                let r = (i * 1987 + 3) % n;
-                self.values.swap(i, r);
+            return; // Don't process other logic during animation
+        }
+
+        // Add delay for visualization
+        self.delay_counter += 1;
+        if self.delay_counter < 30 { // Slow down the animation extremely for crystal clear understanding
+            return;
+        }
+        self.delay_counter = 0;
+
+        // Update swap cooldown
+        if self.swap_cooldown > 0 {
+            self.swap_cooldown -= 1;
+            if self.swap_cooldown == 0 {
+                self.swapped_indices.clear();
+            }
+        }
+
+        // Debug output (uncomment to see algorithm progress)
+        // println!("State: {:?}, Stack len: {}, Values: {:?}", self.state, self.stack.len(), self.values);
+
+        match self.state {
+            SortState::PopingRange => {
+                if let Some((low, high)) = self.stack.pop() {
+                    if low < high {
+                        self.current_low = low;
+                        self.current_high = high;
+                        self.pivot_value = self.values[high]; // Choose last element as pivot
+                        self.i = low;
+                        self.j = low;
+                        self.state = SortState::Partitioning;
+                        
+                        // Visual state updates
+                        self.pivot_index = Some(high);
+                        self.active_range = Some((low, high));
+                        self.comparing_indices.clear();
+                        self.swapped_indices.clear();
+                        // Initialize pointer visualization
+                        self.i_pointer = Some(low);
+                        self.j_pointer = Some(low);
+                    } else {
+                        // Range too small, try next range
+                        self.state = SortState::PopingRange;
+                    }
+                } else {
+                    self.state = SortState::Finished;
+                    // Clear visual states
+                    self.pivot_index = None;
+                    self.active_range = None;
+                    self.comparing_indices.clear();
+                    self.swapped_indices.clear();
+                    self.swap_animation = None;
+                    self.swap_animation_progress = 0.0;
+                    self.i_pointer = None;
+                    self.j_pointer = None;
+                }
+            }
+            SortState::Partitioning => {
+                // Lomuto partition scheme - step by step
+                if self.j < self.current_high {
+                    // Update pointer visualization
+                    self.i_pointer = Some(self.i);
+                    self.j_pointer = Some(self.j);
+                    
+                    // Visual: show current comparison
+                    self.comparing_indices.clear();
+                    self.comparing_indices.push(self.j);
+                    if let Some(pivot_idx) = self.pivot_index {
+                        self.comparing_indices.push(pivot_idx);
+                    }
+                    
+                    if self.values[self.j] < self.pivot_value {
+                        if self.i != self.j {
+                            // Highlight the elements that will be swapped for a moment
+                            self.comparing_indices.clear();
+                            self.comparing_indices.push(self.i);
+                            self.comparing_indices.push(self.j);
+                            
+                            // Start swap animation instead of direct swap
+                            self.swap_animation = Some(SwapAnimation {
+                                index_a: self.i,
+                                index_b: self.j,
+                                value_a: self.values[self.i],
+                                value_b: self.values[self.j],
+                                is_pivot_swap: false,
+                            });
+                            self.swap_animation_progress = 0.0;
+                            self.state = SortState::AnimatingSwap;
+                            self.i += 1;
+                            self.j += 1;
+                            return; // Don't increment j again
+                        }
+                        self.i += 1;
+                    }
+                    self.j += 1;
+                } else {
+                    self.state = SortState::PlacingPivot;
+                    self.comparing_indices.clear();
+                    // Keep i_pointer visible for pivot placement
+                    self.j_pointer = None;
+                }
+            }
+            SortState::AnimatingSwap => {
+                // Animation is handled at the top of the function
+            }
+            SortState::PlacingPivot => {
+                // Start pivot placement animation
+                self.swap_animation = Some(SwapAnimation {
+                    index_a: self.i,
+                    index_b: self.current_high,
+                    value_a: self.values[self.i],
+                    value_b: self.values[self.current_high],
+                    is_pivot_swap: true,
+                });
+                self.swap_animation_progress = 0.0;
+                self.state = SortState::AnimatingPivotPlacement;
+            }
+            SortState::AnimatingPivotPlacement => {
+                // Animation is handled at the top of the function
+            }
+            SortState::PushingRanges => {
+                let partition_idx = self.i;
+                
+                // Push left subarray if it has more than one element
+                if self.current_low < partition_idx {
+                    self.stack.push((self.current_low, partition_idx - 1));
+                }
+                // Push right subarray if it has more than one element
+                if partition_idx < self.current_high {
+                    self.stack.push((partition_idx + 1, self.current_high));
+                }
+                
+                self.state = SortState::PopingRange;
+            }
+            SortState::Finished => {
+                self.state = SortState::Shuffling;
+                self.delay_counter = 0;
+            }
+            SortState::Shuffling => {
+                // Wait a bit before reshuffling
+                if self.delay_counter > 300 { // Wait ~5 seconds at 60fps to appreciate the sorted result
+                    let n = self.values.len();
+                    // Better shuffle using Fisher-Yates algorithm
+                    for i in (1..n).rev() {
+                        let j = (i * 7919 + 1987 + self.delay_counter as usize) % (i + 1);
+                        self.values.swap(i, j);
+                    }
+                    // println!("Reshuffled values: {:?}", self.values);
+                    // Reset for new sort
+                    self.stack.clear();
+                    if n > 1 {
+                        self.stack.push((0, n - 1));
+                    }
+                    self.current_low = 0;
+                    self.current_high = 0;
+                    self.i = 0;
+                    self.j = 0;
+                    self.pivot_value = 0;
+                    self.state = SortState::PopingRange;
+                    self.delay_counter = 0;
+                    // Reset visual states
+                    self.pivot_index = None;
+                    self.comparing_indices.clear();
+                    self.swapped_indices.clear();
+                    self.active_range = None;
+                    self.swap_cooldown = 0;
+                    self.swap_animation = None;
+                    self.swap_animation_progress = 0.0;
+                    self.i_pointer = None;
+                    self.j_pointer = None;
+                }
             }
         }
     }
+
+    fn get_visual_state(&self, index: usize) -> VisualState {
+        // Check if this element is being animated in swap
+        if let Some(anim) = self.swap_animation {
+            if index == anim.index_a || index == anim.index_b {
+                return VisualState::Swapping;
+            }
+        }
+        
+        // Check if this is the pivot
+        if let Some(pivot_idx) = self.pivot_index {
+            if index == pivot_idx {
+                return VisualState::Pivot;
+            }
+        }
+        
+        // Check if recently swapped
+        if self.swapped_indices.contains(&index) {
+            return VisualState::Swapped;
+        }
+        
+        // Check if currently being compared
+        if self.comparing_indices.contains(&index) {
+            return VisualState::Comparing;
+        }
+        
+        // Check for pointer positions (highest priority for active partitioning)
+        let at_i = self.i_pointer.map_or(false, |i| i == index);
+        let at_j = self.j_pointer.map_or(false, |j| j == index);
+        
+        if at_i && at_j {
+            return VisualState::BothPointers;
+        } else if at_i {
+            return VisualState::IPointer;
+        } else if at_j {
+            return VisualState::JPointer;
+        }
+        
+        // Check if in active range
+        if let Some((low, high)) = self.active_range {
+            if index >= low && index <= high {
+                return VisualState::ActiveRange;
+            }
+        }
+        
+        VisualState::Normal
+    }
+
+    fn get_swap_position(&self, index: usize) -> Option<(f32, f32, f32)> {
+        if let Some(anim) = self.swap_animation {
+            if index == anim.index_a || index == anim.index_b {
+                let progress = self.swap_animation_progress;
+                
+                // Calculate positions
+                let base_x = (index as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                let target_index = if index == anim.index_a { anim.index_b } else { anim.index_a };
+                let target_x = (target_index as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                let swap_height = 12.0; // Height of swap zone - higher for better visibility
+                
+                // 4-phase animation for clarity:
+                // Phase 1 (0.0-0.3): Rise up to swap zone
+                // Phase 2 (0.3-0.5): Pause at top (hold position)
+                // Phase 3 (0.5-0.8): Move horizontally to target position
+                // Phase 4 (0.8-1.0): Descend to final position
+                
+                if progress < 0.3 {
+                    // Phase 1: Rising
+                    let up_progress = progress / 0.3;
+                    let y = up_progress * swap_height;
+                    return Some((base_x, y, 0.0));
+                } else if progress < 0.5 {
+                    // Phase 2: Pause at top
+                    return Some((base_x, swap_height, 0.0));
+                } else if progress < 0.8 {
+                    // Phase 3: Moving horizontally
+                    let move_progress = (progress - 0.5) / 0.3;
+                    let x = base_x + (target_x - base_x) * move_progress;
+                    return Some((x, swap_height, 0.0));
+                } else {
+                    // Phase 4: Descending
+                    let down_progress = (progress - 0.8) / 0.2;
+                    let y = swap_height * (1.0 - down_progress);
+                    return Some((target_x, y, 0.0));
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum VisualState {
+    Normal,
+    Pivot,
+    Comparing,
+    Swapped,
+    ActiveRange,
+    Swapping,
+    IPointer,      // Partition boundary pointer
+    JPointer,      // Scanning pointer
+    BothPointers,  // When i and j point to same element
 }
 
 // Helper to find memory type
@@ -340,7 +680,7 @@ fn main() {
 
         // 2. Top Level AS (TLAS)
         let mut sort_system = SortSystem::new(NUM_BARS);
-        let total_instances = NUM_BARS + 1; // Bars + Floor
+        let total_instances = NUM_BARS + 1 + 3; // Bars + Floor + 3 Arrow Markers (i, j, pivot)
 
         let (instance_buffer, instance_mem) = create_buffer(
             (size_of::<vk::AccelerationStructureInstanceKHR>() * total_instances) as u64,
@@ -421,16 +761,27 @@ fn main() {
 
              // Bars
              for (i, &val) in sort_system.values.iter().enumerate() {
-                 let x = (i as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                 // Check if this bar is being animated in swap
+                 let (x, y, _z) = if let Some(swap_pos) = sort_system.get_swap_position(i) {
+                     swap_pos
+                 } else {
+                     ((i as f32 - NUM_BARS as f32 / 2.0) * 1.2, 0.0, 0.0)
+                 };
+                 
                  let height = val as f32 / NUM_BARS as f32 * 5.0;
                  let transform = vk::TransformMatrixKHR { matrix: [
                      1.0, 0.0, 0.0, x,
-                     0.0, height, 0.0, 0.0,
+                     0.0, height, 0.0, y,
                      0.0, 0.0, 1.0, 0.0,
                  ]};
+                 
+                 // Encode both value and visual state in custom index
+                 let visual_state = sort_system.get_visual_state(i) as u32;
+                 let encoded_data = val | (visual_state << 16); // Value in lower 16 bits, state in upper 16 bits
+                 
                  let instance = vk::AccelerationStructureInstanceKHR {
                      transform,
-                     instance_custom_index_and_mask: vk::Packed24_8::new(val, 0xFF),
+                     instance_custom_index_and_mask: vk::Packed24_8::new(encoded_data, 0xFF),
                      instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
                      acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
                  };
@@ -438,6 +789,69 @@ fn main() {
                      std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((i + 1) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
                  }
              }
+             
+             // Arrow Markers (i pointer, j pointer, pivot)
+             let marker_base_idx = NUM_BARS + 1;
+             let arrow_height = 7.5; // Height above bars where arrows float
+             let arrow_scale = 0.3; // Small arrow size
+             
+             // Marker for i pointer (GREEN - custom index 100)
+             if let Some(i_idx) = sort_system.i_pointer {
+                 let x = (i_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                 let transform = vk::TransformMatrixKHR { matrix: [
+                     arrow_scale, 0.0, 0.0, x,
+                     0.0, arrow_scale * 2.0, 0.0, arrow_height,
+                     0.0, 0.0, arrow_scale, 0.0,
+                 ]};
+                 let instance = vk::AccelerationStructureInstanceKHR {
+                     transform,
+                     instance_custom_index_and_mask: vk::Packed24_8::new(100, 0xFF), // 100 = i pointer marker
+                     instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                     acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                 };
+                 unsafe {
+                     std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add(marker_base_idx * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                 }
+             }
+             
+             // Marker for j pointer (CYAN - custom index 101)
+             if let Some(j_idx) = sort_system.j_pointer {
+                 let x = (j_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                 let transform = vk::TransformMatrixKHR { matrix: [
+                     arrow_scale, 0.0, 0.0, x + 0.3, // Offset slightly to the right
+                     0.0, arrow_scale * 2.0, 0.0, arrow_height + 0.5,
+                     0.0, 0.0, arrow_scale, 0.0,
+                 ]};
+                 let instance = vk::AccelerationStructureInstanceKHR {
+                     transform,
+                     instance_custom_index_and_mask: vk::Packed24_8::new(101, 0xFF), // 101 = j pointer marker
+                     instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                     acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                 };
+                 unsafe {
+                     std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((marker_base_idx + 1) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                 }
+             }
+             
+             // Marker for pivot (GOLD - custom index 102)
+             if let Some(pivot_idx) = sort_system.pivot_index {
+                 let x = (pivot_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                 let transform = vk::TransformMatrixKHR { matrix: [
+                     arrow_scale * 1.5, 0.0, 0.0, x,
+                     0.0, arrow_scale * 2.5, 0.0, arrow_height + 1.5,
+                     0.0, 0.0, arrow_scale * 1.5, 0.0,
+                 ]};
+                 let instance = vk::AccelerationStructureInstanceKHR {
+                     transform,
+                     instance_custom_index_and_mask: vk::Packed24_8::new(102, 0xFF), // 102 = pivot marker
+                     instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                     acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                 };
+                 unsafe {
+                     std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((marker_base_idx + 2) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                 }
+             }
+             
              device.unmap_memory(instance_mem);
         }
 
@@ -768,16 +1182,27 @@ fn main() {
 
                          // Bars
                          for (i, &val) in sort_system.values.iter().enumerate() {
-                             let x = (i as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                             // Check if this bar is being animated in swap
+                             let (x, y, _z) = if let Some(swap_pos) = sort_system.get_swap_position(i) {
+                                 swap_pos
+                             } else {
+                                 ((i as f32 - NUM_BARS as f32 / 2.0) * 1.2, 0.0, 0.0)
+                             };
+                             
                              let height = val as f32 / NUM_BARS as f32 * 5.0;
                              let transform = vk::TransformMatrixKHR { matrix: [
                                  1.0, 0.0, 0.0, x,
-                                 0.0, height, 0.0, 0.0,
+                                 0.0, height, 0.0, y,
                                  0.0, 0.0, 1.0, 0.0,
                              ]};
+                             
+                             // Encode both value and visual state in custom index
+                             let visual_state = sort_system.get_visual_state(i) as u32;
+                             let encoded_data = val | (visual_state << 16); // Value in lower 16 bits, state in upper 16 bits
+                             
                              let instance = vk::AccelerationStructureInstanceKHR {
                                  transform,
-                                 instance_custom_index_and_mask: vk::Packed24_8::new(val, 0xFF),
+                                 instance_custom_index_and_mask: vk::Packed24_8::new(encoded_data, 0xFF),
                                  instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
                                  acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
                              };
@@ -785,6 +1210,69 @@ fn main() {
                                  std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((i + 1) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
                              }
                          }
+                         
+                         // Arrow Markers (i pointer, j pointer, pivot)
+                         let marker_base_idx = NUM_BARS + 1;
+                         let arrow_height = 7.5; // Height above bars where arrows float
+                         let arrow_scale = 0.3; // Small arrow size
+                         
+                         // Marker for i pointer (GREEN - custom index 100)
+                         if let Some(i_idx) = sort_system.i_pointer {
+                             let x = (i_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                             let transform = vk::TransformMatrixKHR { matrix: [
+                                 arrow_scale, 0.0, 0.0, x,
+                                 0.0, arrow_scale * 2.0, 0.0, arrow_height,
+                                 0.0, 0.0, arrow_scale, 0.0,
+                             ]};
+                             let instance = vk::AccelerationStructureInstanceKHR {
+                                 transform,
+                                 instance_custom_index_and_mask: vk::Packed24_8::new(100, 0xFF), // 100 = i pointer marker
+                                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                             };
+                             unsafe {
+                                 std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add(marker_base_idx * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                             }
+                         }
+                         
+                         // Marker for j pointer (CYAN - custom index 101)
+                         if let Some(j_idx) = sort_system.j_pointer {
+                             let x = (j_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                             let transform = vk::TransformMatrixKHR { matrix: [
+                                 arrow_scale, 0.0, 0.0, x + 0.3, // Offset slightly to the right
+                                 0.0, arrow_scale * 2.0, 0.0, arrow_height + 0.5,
+                                 0.0, 0.0, arrow_scale, 0.0,
+                             ]};
+                             let instance = vk::AccelerationStructureInstanceKHR {
+                                 transform,
+                                 instance_custom_index_and_mask: vk::Packed24_8::new(101, 0xFF), // 101 = j pointer marker
+                                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                             };
+                             unsafe {
+                                 std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((marker_base_idx + 1) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                             }
+                         }
+                         
+                         // Marker for pivot (GOLD - custom index 102)
+                         if let Some(pivot_idx) = sort_system.pivot_index {
+                             let x = (pivot_idx as f32 - NUM_BARS as f32 / 2.0) * 1.2;
+                             let transform = vk::TransformMatrixKHR { matrix: [
+                                 arrow_scale * 1.5, 0.0, 0.0, x,
+                                 0.0, arrow_scale * 2.5, 0.0, arrow_height + 1.5,
+                                 0.0, 0.0, arrow_scale * 1.5, 0.0,
+                             ]};
+                             let instance = vk::AccelerationStructureInstanceKHR {
+                                 transform,
+                                 instance_custom_index_and_mask: vk::Packed24_8::new(102, 0xFF), // 102 = pivot marker
+                                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+                             };
+                             unsafe {
+                                 std::ptr::copy_nonoverlapping(&instance as *const _ as *const u8, ptr.add((marker_base_idx + 2) * size_of::<vk::AccelerationStructureInstanceKHR>()), size_of::<vk::AccelerationStructureInstanceKHR>());
+                             }
+                         }
+                         
                          device.unmap_memory(instance_mem);
                     }
 
