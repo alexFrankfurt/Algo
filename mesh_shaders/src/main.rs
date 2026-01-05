@@ -30,7 +30,11 @@ struct PushConstants {
     camera_pos: [f32; 4],
     light_pos: [f32; 4],
     time: f32,
-    _padding: [f32; 3],
+    // Selection sort state
+    current_i: i32,      // Current outer loop index (-1 = done)
+    current_j: i32,      // Current inner loop index
+    min_idx: i32,        // Current minimum index
+    bar_heights: [f32; 8], // Heights of all bars
 }
 
 #[repr(C)]
@@ -80,6 +84,9 @@ struct VulkanApp {
     bg_descriptor_set: vk::DescriptorSet,
     bg_pipeline_layout: vk::PipelineLayout,
     bg_pipeline: vk::Pipeline,
+    // Floor pipeline
+    floor_descriptor_set: vk::DescriptorSet,
+    floor_pipeline: vk::Pipeline,
     cubemap_texture: Texture,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -98,10 +105,103 @@ struct VulkanApp {
     vertex_buffer_allocation: Option<Allocation>,
     index_buffer: vk::Buffer,
     index_buffer_allocation: Option<Allocation>,
+    // Selection sort state
+    sort_state: SelectionSortState,
 }
 
+/// Selection sort animation state
+struct SelectionSortState {
+    heights: [f32; 8],
+    current_i: i32,
+    current_j: i32,
+    min_idx: i32,
+    last_step_time: f32,
+    step_interval: f32,
+    phase: SortPhase,
+    heights_changed: bool, // Flag to trigger BLAS rebuild
+}
 
-impl VulkanApp {
+#[derive(Clone, Copy, PartialEq)]
+enum SortPhase {
+    Comparing,  // Scanning for minimum
+    Swapping,   // Animating swap
+    Done,       // Sorting complete
+}
+
+impl SelectionSortState {
+    fn new() -> Self {
+        Self {
+            heights: [0.5, 2.2, 1.0, 1.8, 0.3, 1.5, 2.5, 0.8], // Unsorted heights
+            current_i: 0,
+            current_j: 1,
+            min_idx: 0,
+            last_step_time: 0.0,
+            step_interval: 0.3, // Time between steps
+            phase: SortPhase::Comparing,
+            heights_changed: true, // Initial build needed
+        }
+    }
+
+    fn step(&mut self, time: f32) {
+        if self.phase == SortPhase::Done {
+            return;
+        }
+
+        if time - self.last_step_time < self.step_interval {
+            return;
+        }
+        self.last_step_time = time;
+
+        match self.phase {
+            SortPhase::Comparing => {
+                // Check if current j element is smaller than min
+                if self.heights[self.current_j as usize] < self.heights[self.min_idx as usize] {
+                    self.min_idx = self.current_j;
+                }
+
+                self.current_j += 1;
+
+                // If we've scanned all remaining elements
+                if self.current_j >= 8 {
+                    // Swap if needed
+                    if self.min_idx != self.current_i {
+                        self.phase = SortPhase::Swapping;
+                    } else {
+                        // Move to next i
+                        self.current_i += 1;
+                        if self.current_i >= 7 {
+                            self.phase = SortPhase::Done;
+                        } else {
+                            self.current_j = self.current_i + 1;
+                            self.min_idx = self.current_i;
+                        }
+                    }
+                }
+            }
+            SortPhase::Swapping => {
+                // Perform the swap
+                self.heights.swap(self.current_i as usize, self.min_idx as usize);
+                self.heights_changed = true; // Mark for BLAS rebuild
+                
+                // Move to next i
+                self.current_i += 1;
+                if self.current_i >= 7 {
+                    self.phase = SortPhase::Done;
+                } else {
+                    self.current_j = self.current_i + 1;
+                    self.min_idx = self.current_i;
+                    self.phase = SortPhase::Comparing;
+                }
+            }
+            SortPhase::Done => {}
+        }
+    }
+
+    #[allow(dead_code)]
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}impl VulkanApp {
     unsafe fn new(window: &winit::window::Window) -> Result<Self, Box<dyn std::error::Error>> {
         let entry = Entry::load()?;
 
@@ -399,13 +499,13 @@ impl VulkanApp {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(4),
+                .descriptor_count(8),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                .descriptor_count(1),
+                .descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(2)
+            .max_sets(3)
             .pool_sizes(&pool_sizes);
         let descriptor_pool = device.create_descriptor_pool(&pool_info, None)?;
 
@@ -510,6 +610,58 @@ impl VulkanApp {
 
         let bg_pipeline = Self::create_background_pipeline(&device, render_pass, bg_pipeline_layout, extent)?;
 
+        // === FLOOR PIPELINE SETUP ===
+        // Floor uses same descriptor layout as cubes (textures + TLAS)
+        let floor_alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
+        let floor_descriptor_sets = device.allocate_descriptor_sets(&floor_alloc_info)?;
+        let floor_descriptor_set = floor_descriptor_sets[0];
+
+        // Update floor descriptor set (same textures + TLAS)
+        let floor_image_infos = [
+            vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(albedo_texture.view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(normal_texture.view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(rma_texture.view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        ];
+
+        let mut floor_writes: Vec<_> = floor_image_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(floor_descriptor_set)
+                    .dst_binding(i as u32)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(info))
+            })
+            .collect();
+
+        let floor_accel_structs = [tlas.handle];
+        let mut floor_accel_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&floor_accel_structs);
+        
+        let floor_accel_write = vk::WriteDescriptorSet::default()
+            .dst_set(floor_descriptor_set)
+            .dst_binding(3)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1)
+            .push_next(&mut floor_accel_write_info);
+        floor_writes.push(floor_accel_write);
+
+        device.update_descriptor_sets(&floor_writes, &[]);
+
+        let floor_pipeline = Self::create_floor_pipeline(&device, render_pass, pipeline_layout, extent)?;
+
         // Allocate command buffers
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -549,6 +701,8 @@ impl VulkanApp {
             bg_descriptor_set,
             bg_pipeline_layout,
             bg_pipeline,
+            floor_descriptor_set,
+            floor_pipeline,
             cubemap_texture,
             command_pool,
             command_buffers,
@@ -566,6 +720,7 @@ impl VulkanApp {
             vertex_buffer_allocation,
             index_buffer,
             index_buffer_allocation,
+            sort_state: SelectionSortState::new(),
         })
     }
 
@@ -594,38 +749,41 @@ impl VulkanApp {
         command_pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<(AccelerationStructure, AccelerationStructure, vk::Buffer, Option<Allocation>, vk::Buffer, Option<Allocation>), Box<dyn std::error::Error>> {
-        // Create geometry for 8 cubes in a ring (matching mesh shader)
-        let num_cubes = 8u32;
+        // Create geometry for 8 bars in a row (matching mesh shader)
+        let num_bars = 8u32;
         let mut all_vertices: Vec<Vertex> = Vec::new();
         let mut all_indices: Vec<u32> = Vec::new();
         
-        for cube_idx in 0..num_cubes {
-            let angle = cube_idx as f32 * std::f32::consts::TAU / num_cubes as f32;
-            let radius = 2.0f32;
-            let offset = Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
-            let size = 0.35f32;
+        // Bar heights matching the sort_state initial values
+        let heights = [0.5f32, 2.2, 1.0, 1.8, 0.3, 1.5, 2.5, 0.8];
+        
+        for bar_idx in 0..num_bars {
+            let x_offset = (bar_idx as f32 - 3.5) * 0.7; // Spread bars along X axis
+            let height = heights[bar_idx as usize];
+            let half_width = 0.25f32;
+            let half_depth = 0.25f32;
             
             let base_vertex = all_vertices.len() as u32;
             
-            // 8 vertices per cube
+            // 8 vertices per bar (box)
             let positions = [
-                Vec3::new(-size, -size, -size),
-                Vec3::new( size, -size, -size),
-                Vec3::new( size,  size, -size),
-                Vec3::new(-size,  size, -size),
-                Vec3::new(-size, -size,  size),
-                Vec3::new( size, -size,  size),
-                Vec3::new( size,  size,  size),
-                Vec3::new(-size,  size,  size),
+                Vec3::new(-half_width, 0.0, -half_depth),
+                Vec3::new( half_width, 0.0, -half_depth),
+                Vec3::new( half_width, height, -half_depth),
+                Vec3::new(-half_width, height, -half_depth),
+                Vec3::new(-half_width, 0.0,  half_depth),
+                Vec3::new( half_width, 0.0,  half_depth),
+                Vec3::new( half_width, height,  half_depth),
+                Vec3::new(-half_width, height,  half_depth),
             ];
             
             for pos in &positions {
-                let world_pos = *pos + offset;
+                let world_pos = *pos + Vec3::new(x_offset, -1.0, 0.0);
                 all_vertices.push(Vertex { pos: world_pos.to_array(), _pad: 0.0 });
             }
             
-            // 12 triangles (36 indices) per cube
-            let cube_indices: [u32; 36] = [
+            // 12 triangles (36 indices) per bar
+            let bar_indices: [u32; 36] = [
                 0, 2, 1, 0, 3, 2,  // Front
                 4, 5, 6, 4, 6, 7,  // Back
                 0, 4, 7, 0, 7, 3,  // Left
@@ -634,7 +792,7 @@ impl VulkanApp {
                 0, 1, 5, 0, 5, 4,  // Bottom
             ];
             
-            for idx in &cube_indices {
+            for idx in &bar_indices {
                 all_indices.push(base_vertex + idx);
             }
         }
@@ -1030,6 +1188,294 @@ impl VulkanApp {
         };
 
         Ok((blas, tlas, vertex_buffer, Some(vertex_allocation), index_buffer, Some(index_allocation)))
+    }
+
+    /// Update the acceleration structure with new bar heights
+    unsafe fn update_acceleration_structure(&mut self, heights: &[f32; 8]) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for GPU to be idle before modifying buffers
+        self.device.device_wait_idle()?;
+
+        // Generate new vertex data with updated heights
+        let num_bars = 8u32;
+        let mut all_vertices: Vec<Vertex> = Vec::new();
+        
+        for bar_idx in 0..num_bars {
+            let x_offset = (bar_idx as f32 - 3.5) * 0.7;
+            let height = heights[bar_idx as usize];
+            let half_width = 0.25f32;
+            let half_depth = 0.25f32;
+            
+            let positions = [
+                Vec3::new(-half_width, 0.0, -half_depth),
+                Vec3::new( half_width, 0.0, -half_depth),
+                Vec3::new( half_width, height, -half_depth),
+                Vec3::new(-half_width, height, -half_depth),
+                Vec3::new(-half_width, 0.0,  half_depth),
+                Vec3::new( half_width, 0.0,  half_depth),
+                Vec3::new( half_width, height,  half_depth),
+                Vec3::new(-half_width, height,  half_depth),
+            ];
+            
+            for pos in &positions {
+                let world_pos = *pos + Vec3::new(x_offset, -1.0, 0.0);
+                all_vertices.push(Vertex { pos: world_pos.to_array(), _pad: 0.0 });
+            }
+        }
+
+        // Upload new vertex data via staging buffer
+        let vertex_buffer_size = (all_vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
+        
+        let staging_info = vk::BufferCreateInfo::default()
+            .size(vertex_buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let staging_buffer = self.device.create_buffer(&staging_info, None)?;
+        let staging_req = self.device.get_buffer_memory_requirements(staging_buffer);
+        
+        let staging_allocation = self.allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "staging_update",
+            requirements: staging_req,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        self.device.bind_buffer_memory(staging_buffer, staging_allocation.memory(), staging_allocation.offset())?;
+
+        // Copy vertex data to staging
+        let mapped = staging_allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+        std::ptr::copy_nonoverlapping(
+            all_vertices.as_ptr() as *const u8,
+            mapped,
+            vertex_buffer_size as usize,
+        );
+
+        // Transfer to GPU and rebuild BLAS
+        let cmd_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = self.device.allocate_command_buffers(&cmd_info)?[0];
+        self.device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())?;
+
+        let vertex_copy = vk::BufferCopy::default().size(vertex_buffer_size);
+        self.device.cmd_copy_buffer(cmd, staging_buffer, self.vertex_buffer, &[vertex_copy]);
+
+        // Memory barrier before AS build
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+
+        // Get buffer addresses
+        let vertex_address = self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(self.vertex_buffer));
+        let index_address = self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(self.index_buffer));
+
+        // Rebuild BLAS with new geometry
+        let geometry = vk::AccelerationStructureGeometryKHR::default()
+            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+            .flags(vk::GeometryFlagsKHR::OPAQUE)
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                    .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                    .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: vertex_address })
+                    .vertex_stride(std::mem::size_of::<Vertex>() as vk::DeviceSize)
+                    .max_vertex(all_vertices.len() as u32 - 1)
+                    .index_type(vk::IndexType::UINT32)
+                    .index_data(vk::DeviceOrHostAddressConstKHR { device_address: index_address }),
+            });
+
+        // Get scratch size
+        let build_info_query = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .geometries(std::slice::from_ref(&geometry));
+
+        let primitive_count = (num_bars * 12) as u32; // 12 triangles per bar
+        let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        self.accel_struct_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &build_info_query,
+            &[primitive_count],
+            &mut size_info,
+        );
+
+        // Create scratch buffer
+        let scratch_buffer_info = vk::BufferCreateInfo::default()
+            .size(size_info.build_scratch_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let scratch_buffer = self.device.create_buffer(&scratch_buffer_info, None)?;
+        let scratch_req = self.device.get_buffer_memory_requirements(scratch_buffer);
+        
+        let scratch_allocation = self.allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "scratch_update",
+            requirements: scratch_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        self.device.bind_buffer_memory(scratch_buffer, scratch_allocation.memory(), scratch_allocation.offset())?;
+        let scratch_address = self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(scratch_buffer));
+
+        // Build BLAS
+        let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .dst_acceleration_structure(self.blas.handle)
+            .geometries(std::slice::from_ref(&geometry))
+            .scratch_data(vk::DeviceOrHostAddressKHR { device_address: scratch_address });
+
+        let build_range = vk::AccelerationStructureBuildRangeInfoKHR::default()
+            .primitive_count(primitive_count)
+            .primitive_offset(0)
+            .first_vertex(0);
+
+        self.accel_struct_ext.cmd_build_acceleration_structures(cmd, &[build_info], &[&[build_range]]);
+
+        // Barrier between BLAS and TLAS rebuild
+        let barrier2 = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+            .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+            vk::DependencyFlags::empty(),
+            &[barrier2],
+            &[],
+            &[],
+        );
+
+        // Rebuild TLAS (instance data unchanged, but BLAS content changed)
+        let blas_address = self.accel_struct_ext.get_acceleration_structure_device_address(
+            &vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(self.blas.handle)
+        );
+
+        let instance = vk::AccelerationStructureInstanceKHR {
+            transform: vk::TransformMatrixKHR { matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+            ]},
+            instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xFF),
+            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_address },
+        };
+
+        // Create instance buffer
+        let instance_buffer_size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() as vk::DeviceSize;
+        let instance_buffer_info = vk::BufferCreateInfo::default()
+            .size(instance_buffer_size)
+            .usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR 
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let instance_buffer = self.device.create_buffer(&instance_buffer_info, None)?;
+        let instance_req = self.device.get_buffer_memory_requirements(instance_buffer);
+        
+        let instance_allocation = self.allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "instance_buffer_update",
+            requirements: instance_req,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        self.device.bind_buffer_memory(instance_buffer, instance_allocation.memory(), instance_allocation.offset())?;
+
+        let inst_mapped = instance_allocation.mapped_ptr().unwrap().as_ptr() as *mut vk::AccelerationStructureInstanceKHR;
+        std::ptr::copy_nonoverlapping(&instance, inst_mapped, 1);
+
+        let instance_address = self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(instance_buffer));
+
+        // TLAS geometry
+        let tlas_geometry = vk::AccelerationStructureGeometryKHR::default()
+            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+            .flags(vk::GeometryFlagsKHR::OPAQUE)
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
+                    .data(vk::DeviceOrHostAddressConstKHR { device_address: instance_address }),
+            });
+
+        // Get TLAS scratch size
+        let tlas_build_info_query = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .geometries(std::slice::from_ref(&tlas_geometry));
+
+        let mut tlas_size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        self.accel_struct_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &tlas_build_info_query,
+            &[1],
+            &mut tlas_size_info,
+        );
+
+        // Create TLAS scratch buffer
+        let tlas_scratch_info = vk::BufferCreateInfo::default()
+            .size(tlas_size_info.build_scratch_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        
+        let tlas_scratch = self.device.create_buffer(&tlas_scratch_info, None)?;
+        let tlas_scratch_req = self.device.get_buffer_memory_requirements(tlas_scratch);
+        
+        let tlas_scratch_alloc = self.allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "tlas_scratch_update",
+            requirements: tlas_scratch_req,
+            location: MemoryLocation::GpuOnly,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        self.device.bind_buffer_memory(tlas_scratch, tlas_scratch_alloc.memory(), tlas_scratch_alloc.offset())?;
+        let tlas_scratch_address = self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(tlas_scratch));
+
+        // Build TLAS
+        let tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .dst_acceleration_structure(self.tlas.handle)
+            .geometries(std::slice::from_ref(&tlas_geometry))
+            .scratch_data(vk::DeviceOrHostAddressKHR { device_address: tlas_scratch_address });
+
+        let tlas_build_range = vk::AccelerationStructureBuildRangeInfoKHR::default()
+            .primitive_count(1)
+            .primitive_offset(0)
+            .first_vertex(0);
+
+        self.accel_struct_ext.cmd_build_acceleration_structures(cmd, &[tlas_build_info], &[&[tlas_build_range]]);
+
+        self.device.end_command_buffer(cmd)?;
+        
+        let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+        self.device.queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())?;
+        self.device.queue_wait_idle(self.graphics_queue)?;
+        self.device.free_command_buffers(self.command_pool, &[cmd]);
+
+        // Clean up temporary buffers
+        self.device.destroy_buffer(staging_buffer, None);
+        self.allocator.lock().unwrap().free(staging_allocation)?;
+        self.device.destroy_buffer(scratch_buffer, None);
+        self.allocator.lock().unwrap().free(scratch_allocation)?;
+        self.device.destroy_buffer(instance_buffer, None);
+        self.allocator.lock().unwrap().free(instance_allocation)?;
+        self.device.destroy_buffer(tlas_scratch, None);
+        self.allocator.lock().unwrap().free(tlas_scratch_alloc)?;
+
+        Ok(())
     }
 
 
@@ -1593,6 +2039,98 @@ impl VulkanApp {
         Ok(pipelines[0])
     }
 
+    unsafe fn create_floor_pipeline(
+        device: &Device,
+        render_pass: vk::RenderPass,
+        layout: vk::PipelineLayout,
+        extent: vk::Extent2D,
+    ) -> Result<vk::Pipeline, Box<dyn std::error::Error>> {
+        let vert_code = include_bytes!("shaders/floor.vert.spv");
+        let frag_code = include_bytes!("shaders/floor.frag.spv");
+
+        let vert_module = Self::create_shader_module(device, vert_code)?;
+        let frag_module = Self::create_shader_module(device, frag_code)?;
+
+        let entry_point = CStr::from_bytes_with_nul(b"main\0")?;
+
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(entry_point),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(entry_point),
+        ];
+
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(std::slice::from_ref(&viewport))
+            .scissors(std::slice::from_ref(&scissor));
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        // Enable alpha blending for floor fade
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD);
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(std::slice::from_ref(&color_blend_attachment));
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending)
+            .layout(layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipelines = device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|e| format!("Floor pipeline creation failed: {:?}", e.1))?;
+
+        device.destroy_shader_module(vert_module, None);
+        device.destroy_shader_module(frag_module, None);
+
+        Ok(pipelines[0])
+    }
+
     unsafe fn create_shader_module(device: &Device, code: &[u8]) -> Result<vk::ShaderModule, vk::Result> {
         let code_u32: Vec<u32> = code
             .chunks_exact(4)
@@ -1602,7 +2140,18 @@ impl VulkanApp {
         device.create_shader_module(&create_info, None)
     }
 
-    unsafe fn draw_frame(&mut self, time: f32, pitch: f32) -> Result<(), vk::Result> {
+    unsafe fn draw_frame(&mut self, time: f32, _pitch: f32) -> Result<(), vk::Result> {
+        // Update selection sort state first
+        self.sort_state.step(time);
+
+        // Update acceleration structure if heights changed (for correct shadows)
+        if self.sort_state.heights_changed {
+            self.sort_state.heights_changed = false;
+            if let Err(e) = self.update_acceleration_structure(&self.sort_state.heights.clone()) {
+                eprintln!("Failed to update acceleration structure: {:?}", e);
+            }
+        }
+
         self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
         self.device.reset_fences(&[self.in_flight_fence])?;
 
@@ -1632,31 +2181,17 @@ impl VulkanApp {
         let aspect = self.extent.width as f32 / self.extent.height as f32;
         let proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         
-        let camera_angle = time * 0.3;
-        let camera_radius = 5.0;
-        
-        let camera_pos = Vec3::new(
-            camera_angle.sin() * camera_radius,
-            1.5,
-            camera_angle.cos() * camera_radius,
-        );
-        
-        let look_dir = Vec3::new(
-            -camera_pos.x,
-            pitch.sin() * camera_radius,
-            -camera_pos.z,
-        ).normalize();
-        let look_target = camera_pos + look_dir;
+        // Camera slightly elevated, looking down at the floor with bars
+        let camera_pos = Vec3::new(0.0, 1.5, 7.0);
+        let look_target = Vec3::new(0.0, -0.5, 0.0);
         let view = Mat4::look_at_rh(camera_pos, look_target, Vec3::Y);
         
-        let model = Mat4::from_rotation_y(time * 0.5);
-        let mvp = proj * view * model;
-        
+        let mvp = proj * view;
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
 
-        // Light position behind the camera
-        let light_pos = camera_pos + Vec3::new(0.0, 3.0, 0.0);
+        // Light behind bars, high up - shadows cast toward camera onto floor
+        let light_pos = Vec3::new(0.0, 5.0, -5.0);
 
         // === DRAW BACKGROUND FIRST ===
         self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
@@ -1675,7 +2210,10 @@ impl VulkanApp {
             camera_pos: Vec4::new(camera_pos.x, camera_pos.y, camera_pos.z, 1.0).to_array(),
             light_pos: Vec4::new(light_pos.x, light_pos.y, light_pos.z, 1.0).to_array(),
             time,
-            _padding: [0.0; 3],
+            current_i: -1,
+            current_j: -1,
+            min_idx: -1,
+            bar_heights: [0.0; 8],
         };
 
         self.device.cmd_push_constants(
@@ -1687,6 +2225,41 @@ impl VulkanApp {
         );
 
         self.device.cmd_draw(cmd, 3, 1, 0, 0);
+
+        // === DRAW FLOOR ===
+        self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.floor_pipeline);
+        self.device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipeline_layout,
+            0,
+            &[self.floor_descriptor_set],
+            &[],
+        );
+
+        // Floor uses view_proj directly (no model rotation)
+        let floor_mvp = view_proj;
+        let floor_push_constants = PushConstants {
+            mvp: floor_mvp.to_cols_array_2d(),
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            camera_pos: Vec4::new(camera_pos.x, camera_pos.y, camera_pos.z, 1.0).to_array(),
+            light_pos: Vec4::new(light_pos.x, light_pos.y, light_pos.z, 1.0).to_array(),
+            time,
+            current_i: -1,
+            current_j: -1,
+            min_idx: -1,
+            bar_heights: [0.0; 8],
+        };
+
+        self.device.cmd_push_constants(
+            cmd,
+            self.pipeline_layout,
+            vk::ShaderStageFlags::MESH_EXT | vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            bytemuck::bytes_of(&floor_push_constants),
+        );
+
+        self.device.cmd_draw(cmd, 6, 1, 0, 0);
 
         // === DRAW MESH SHADER CUBES ===
         self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -1705,7 +2278,10 @@ impl VulkanApp {
             camera_pos: Vec4::new(camera_pos.x, camera_pos.y, camera_pos.z, 1.0).to_array(),
             light_pos: Vec4::new(light_pos.x, light_pos.y, light_pos.z, 1.0).to_array(),
             time,
-            _padding: [0.0; 3],
+            current_i: self.sort_state.current_i,
+            current_j: self.sort_state.current_j,
+            min_idx: self.sort_state.min_idx,
+            bar_heights: self.sort_state.heights,
         };
 
         self.device.cmd_push_constants(
@@ -1815,6 +2391,7 @@ impl Drop for VulkanApp {
             self.device.destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_pipeline(self.bg_pipeline, None);
             self.device.destroy_pipeline_layout(self.bg_pipeline_layout, None);
+            self.device.destroy_pipeline(self.floor_pipeline, None);
             self.device.destroy_render_pass(self.render_pass, None);
 
             for &view in &self.swapchain_image_views {
@@ -1832,7 +2409,7 @@ impl Drop for VulkanApp {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
-        .with_title("Mesh Shader + RT Shadows Demo")
+        .with_title("Selection Sort Visualization - Press R to Reset")
         .with_inner_size(winit::dpi::LogicalSize::new(WIDTH, HEIGHT))
         .build(&event_loop)?;
 
@@ -1858,6 +2435,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pitch = (pitch - pitch_speed).max(-max_pitch);
                         }
                         PhysicalKey::Code(KeyCode::Escape) => elwt.exit(),
+                        PhysicalKey::Code(KeyCode::KeyR) => {
+                            app.sort_state.reset();
+                        }
                         _ => {}
                     }
                 }

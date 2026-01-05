@@ -1,7 +1,7 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// Task shader - dispatches mesh shader workgroups
+// Task shader - dispatches mesh shader workgroups for selection sort bars
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
@@ -18,16 +18,15 @@ layout(push_constant) uniform PushConstants {
     vec4 camera_pos;
     vec4 light_pos;
     float time;
+    int current_i;
+    int current_j;
+    int min_idx;
+    float bar_heights[8];
 } pc;
 
 void main() {
     payload.meshletCount = 8;
-    
-    payload.baseColor = vec3(
-        0.5 + 0.5 * sin(pc.time),
-        0.5 + 0.5 * sin(pc.time + 2.094),
-        0.5 + 0.5 * sin(pc.time + 4.188)
-    );
+    payload.baseColor = vec3(1.0);
     
     EmitMeshTasksEXT(payload.meshletCount, 1, 1);
 }

@@ -13,6 +13,8 @@ fn main() {
         ("src/shaders/frag.glsl", "src/shaders/frag.spv", "frag"),
         ("src/shaders/background.vert.glsl", "src/shaders/background.vert.spv", "vert"),
         ("src/shaders/background.frag.glsl", "src/shaders/background.frag.spv", "background_frag"),
+        ("src/shaders/floor.vert.glsl", "src/shaders/floor.vert.spv", "vert"),
+        ("src/shaders/floor.frag.glsl", "src/shaders/floor.frag.spv", "floor_frag"),
     ];
     
     for (input, output, shader_type) in shaders {
@@ -26,6 +28,7 @@ fn main() {
             "frag" => "frag",
             "vert" => "vert",
             "background_frag" => "frag",
+            "floor_frag" => "frag",
             _ => panic!("Unknown shader type"),
         };
         
